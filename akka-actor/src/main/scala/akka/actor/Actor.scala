@@ -19,6 +19,8 @@ import akka.{ AkkaApplication, AkkaException }
 
 import scala.reflect.BeanProperty
 import scala.util.control.NoStackTrace
+import scala.util.continuations._
+import scala.collection.immutable.Queue
 
 import com.eaio.uuid.UUID
 
@@ -398,6 +400,51 @@ trait Actor {
   def unbecome() {
     val h = context.hotswap
     if (h.nonEmpty) context.hotswap = h.pop
+  }
+
+  private var repeatReact = false
+  private var stashed: Queue[Any] = Queue()
+
+  /**
+   * Stashes the current message, so that the Actor can process it later.
+   */
+  def stash() {
+    repeatReact = true
+    stashed = stashed enqueue context.currentMessage.message
+  }
+
+  /**
+   * Puts all stashed messages back into the mailbox of this Actor. This
+   * enables processing those messages subsequently.
+   *
+   * This method should be called before processing a message using react.
+   */
+  def unstashAll() {
+    for (msg ← stashed)
+      self forward msg
+    stashed = Queue()
+  }
+
+  /**
+   * Receives only a single message. Stash/unstashAll should be used
+   * to handle messages that the Actor currently doesn't process:
+   *
+   * react {
+   *   case A(..) => unstashAll(); ...
+   *   case _ => stash()
+   * }
+   */
+  def react(behavior: Receive): Unit @suspendable = {
+    shift { (k: Unit ⇒ Unit) ⇒
+      val beh = behavior andThen ((ret: Unit) ⇒
+        if (!repeatReact) {
+          unbecome()
+          k(ret)
+        } else {
+          repeatReact = false
+        })
+      become(beh, false) // to be able to go back to behavior that was active before react
+    }
   }
 
   /**
