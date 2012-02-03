@@ -3,7 +3,8 @@ package akka.actor
 import akka.dispatch.{ Mailbox, DispatcherWithStash, MessageQueueWithStash }
 import scala.util.continuations.{ cpsParam, shift, reset }
 
-trait RichActor extends Actor {
+trait RichActor {
+  /*  self: Actor ⇒
 
   override val dispatcher =
     DispatcherWithStash.globalDispatcher
@@ -14,7 +15,7 @@ trait RichActor extends Actor {
       mbox = context.asInstanceOf[ActorCell].mailbox
     } catch {
       case e ⇒
-        throw new ActorInitializationException(self, "mailbox with stash required", e)
+        throw new ActorInitializationException(self, "could not initialize mailbox", e)
     } finally {
       if (mbox == null || !mbox.isInstanceOf[MessageQueueWithStash])
         throw new ActorInitializationException(self, "mailbox with stash required")
@@ -29,5 +30,5 @@ trait RichActor extends Actor {
   def unstashAll(): Unit = {
     mailbox.unstashAll()
   }
-
+*/
 }
