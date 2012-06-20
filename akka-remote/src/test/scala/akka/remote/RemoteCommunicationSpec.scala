@@ -6,7 +6,7 @@ package akka.remote
 import akka.testkit._
 import akka.actor._
 import com.typesafe.config._
-import akka.dispatch.Await
+import akka.dispatch.{ Await, Future }
 import akka.pattern.ask
 
 object RemoteCommunicationSpec {
@@ -31,6 +31,7 @@ object RemoteCommunicationSpec {
   }
 }
 
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class RemoteCommunicationSpec extends AkkaSpec("""
 akka {
   actor.provider = "akka.remote.RemoteActorRefProvider"
@@ -39,8 +40,8 @@ akka {
     port = 12345
   }
   actor.deployment {
-    /blub.remote = "akka://remote_sys@localhost:12346"
-    /looker/child.remote = "akka://remote_sys@localhost:12346"
+    /blub.remote = "akka://remote-sys@localhost:12346"
+    /looker/child.remote = "akka://remote-sys@localhost:12346"
     /looker/child/grandchild.remote = "akka://RemoteCommunicationSpec@localhost:12345"
   }
 }
@@ -49,7 +50,7 @@ akka {
   import RemoteCommunicationSpec._
 
   val conf = ConfigFactory.parseString("akka.remote.netty.port=12346").withFallback(system.settings.config)
-  val other = ActorSystem("remote_sys", conf)
+  val other = ActorSystem("remote-sys", conf)
 
   val remote = other.actorOf(Props(new Actor {
     def receive = {
@@ -57,7 +58,7 @@ akka {
     }
   }), "echo")
 
-  val here = system.actorFor("akka://remote_sys@localhost:12346/user/echo")
+  val here = system.actorFor("akka://remote-sys@localhost:12346/user/echo")
 
   override def atTermination() {
     other.shutdown()
@@ -87,13 +88,13 @@ akka {
 
     "send dead letters on remote if actor does not exist" in {
       EventFilter.warning(pattern = "dead.*buh", occurrences = 1).intercept {
-        system.actorFor("akka://remote_sys@localhost:12346/does/not/exist") ! "buh"
+        system.actorFor("akka://remote-sys@localhost:12346/does/not/exist") ! "buh"
       }(other)
     }
 
     "create and supervise children on remote node" in {
       val r = system.actorOf(Props[Echo], "blub")
-      r.path.toString must be === "akka://remote_sys@localhost:12346/remote/RemoteCommunicationSpec@localhost:12345/user/blub"
+      r.path.toString must be === "akka://remote-sys@localhost:12346/remote/RemoteCommunicationSpec@localhost:12345/user/blub"
       r ! 42
       expectMsg(42)
       EventFilter[Exception]("crash", occurrences = 1).intercept {
@@ -123,8 +124,15 @@ akka {
       myref ! 43
       expectMsg(43)
       lastSender must be theSameInstanceAs remref
+      r.asInstanceOf[RemoteActorRef].getParent must be(l)
+      system.actorFor("/user/looker/child") must be theSameInstanceAs r
       Await.result(l ? "child/..", timeout.duration).asInstanceOf[AnyRef] must be theSameInstanceAs l
       Await.result(system.actorFor(system / "looker" / "child") ? "..", timeout.duration).asInstanceOf[AnyRef] must be theSameInstanceAs l
+    }
+
+    "not fail ask across node boundaries" in {
+      val f = for (_ ← 1 to 1000) yield here ? "ping" mapTo manifest[(String, ActorRef)]
+      Await.result(Future.sequence(f), remaining).map(_._1).toSet must be(Set("pong"))
     }
 
   }

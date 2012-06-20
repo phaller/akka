@@ -7,8 +7,8 @@ Contents
    intro/index
    general/index
    common/index
-   scala/index
    java/index
+   scala/index
    cluster/index
    modules/index
    dev/index
@@ -22,7 +22,7 @@ Links
 
 * `Downloads <http://akka.io/downloads/>`_
 
-* `Source Code <http://github.com/jboner/akka>`_
+* `Source Code <http://github.com/akka/akka>`_
 
 * :ref:`scaladoc`
 

@@ -8,7 +8,7 @@ import sys, os
 # -- General configuration -----------------------------------------------------
 
 sys.path.append(os.path.abspath('_sphinx/exts'))
-extensions = ['sphinx.ext.todo', 'includecode']
+extensions = ['sphinx.ext.todo', 'includecode', 'sphinx.ext.graphviz']
 
 templates_path = ['_templates']
 source_suffix = '.rst'
@@ -17,8 +17,8 @@ exclude_patterns = ['_build', 'pending', 'disabled']
 
 project = u'Akka'
 copyright = u'2011, Typesafe Inc'
-version = '2.0-SNAPSHOT'
-release = '2.0-SNAPSHOT'
+version = '2.1-SNAPSHOT'
+release = '2.1-SNAPSHOT'
 
 pygments_style = 'simple'
 highlight_language = 'scala'
@@ -29,6 +29,7 @@ show_authors = True
 
 html_theme = 'akka'
 html_theme_path = ['_sphinx/themes']
+html_favicon = '_sphinx/static/favicon.ico'
 
 html_title = 'Akka Documentation'
 html_logo = '_sphinx/static/logo.png'
@@ -45,12 +46,25 @@ html_show_sourcelink = False
 html_show_sphinx = False
 html_show_copyright = True
 htmlhelp_basename = 'Akkadoc'
+html_add_permalinks = ''
+
+html_context = {
+  'include_analytics': 'online' in tags
+}
+
+# -- Options for EPUB output ---------------------------------------------------
+epub_author = "Typesafe Inc"
+epub_language = "en"
+epub_publisher = epub_author
+epub_identifier = "http://doc.akka.io/docs/akka/snapshot/"
+epub_scheme = "URL"
+epub_cover = ("_sphinx/static/akka.png", "")
 
 # -- Options for LaTeX output --------------------------------------------------
 
 def setup(app):
-     from sphinx.util.texescape import tex_replacements
-     tex_replacements.append((u'⇒', ur'\(\Rightarrow\)'))
+  from sphinx.util.texescape import tex_replacements
+  tex_replacements.append((u'⇒', ur'\(\Rightarrow\)'))
 
 latex_paper_size = 'a4'
 latex_font_size = '10pt'

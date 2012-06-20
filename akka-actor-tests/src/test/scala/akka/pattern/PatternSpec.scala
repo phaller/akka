@@ -7,10 +7,9 @@ package akka.pattern
 import akka.testkit.AkkaSpec
 import akka.actor.Props
 import akka.actor.Actor
-import akka.actor.ActorTimeoutException
-import akka.dispatch.Await
 import akka.util.Duration
 import akka.util.duration._
+import akka.dispatch.{ Future, Promise, Await }
 
 object PatternSpec {
   case class Work(duration: Duration)
@@ -40,13 +39,26 @@ class PatternSpec extends AkkaSpec {
       Await.ready(gracefulStop(target, 1 millis), 1 second)
     }
 
-    "complete Future with ActorTimeoutException when actor not terminated within timeout" in {
+    "complete Future with AskTimeoutException when actor not terminated within timeout" in {
       val target = system.actorOf(Props[TargetActor])
       target ! Work(250 millis)
-      val result = gracefulStop(target, 10 millis)
-      intercept[ActorTimeoutException] {
-        Await.result(result, 200 millis)
-      }
+      intercept[AskTimeoutException] { Await.result(gracefulStop(target, 10 millis), 200 millis) }
+    }
+  }
+
+  "pattern.after" must {
+    "be completed successfully eventually" in {
+      val f = after(1 second, using = system.scheduler)(Promise.successful(5))
+
+      val r = Future.firstCompletedOf(Seq(Promise[Int](), f))
+      Await.result(r, remaining) must be(5)
+    }
+
+    "be completed abnormally eventually" in {
+      val f = after(1 second, using = system.scheduler)(Promise.failed(new IllegalStateException("Mexico")))
+
+      val r = Future.firstCompletedOf(Seq(Promise[Int](), f))
+      intercept[IllegalStateException] { Await.result(r, remaining) }.getMessage must be("Mexico")
     }
   }
 }

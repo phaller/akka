@@ -43,6 +43,7 @@ class RemoteConfigSpec extends AkkaSpec(
       UsePassiveConnections must be(true)
       Hostname must not be "" // will be set to the local IP
       PortSelector must be(0)
+      OutboundLocalAddress must be(None)
       MessageFrameSize must be(1048576)
       ConnectionTimeout must be(2 minutes)
       Backlog must be(4096)
@@ -55,6 +56,10 @@ class RemoteConfigSpec extends AkkaSpec(
       WriteTimeout must be(10 seconds)
       AllTimeout must be(0 millis)
       ReconnectionTimeWindow must be(10 minutes)
+      WriteBufferHighWaterMark must be(None)
+      WriteBufferLowWaterMark must be(None)
+      SendBufferSize must be(None)
+      ReceiveBufferSize must be(None)
     }
 
   }

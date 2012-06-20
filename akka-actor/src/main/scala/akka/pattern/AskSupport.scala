@@ -3,20 +3,19 @@
  */
 package akka.pattern
 
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeoutException
-import akka.actor.{ Terminated, Status, MinimalActorRef, InternalActorRef, ActorRef, ActorPath }
-import akka.dispatch.{ Promise, Terminate, SystemMessage, Future }
-import akka.event.DeathWatch
-import akka.actor.ActorRefProvider
-import akka.util.Timeout
+import annotation.tailrec
+import akka.actor._
+import akka.dispatch._
+import akka.util.{ NonFatal, Timeout, Unsafe }
 
 /**
  * This is what is used to complete a Future that is returned from an ask/? call,
  * when it times out.
  */
-class AskTimeoutException(message: String, cause: Throwable) extends TimeoutException {
+class AskTimeoutException(message: String, cause: Throwable) extends TimeoutException(message) {
   def this(message: String) = this(message, null: Throwable)
+  override def getCause(): Throwable = cause
 }
 
 /**
@@ -45,7 +44,7 @@ trait AskSupport {
    * Sends a message asynchronously and returns a [[akka.dispatch.Future]]
    * holding the eventual reply message; this means that the target actor
    * needs to send the result to the `sender` reference provided. The Future
-   * will be completed with an [[akka.actor.AskTimeoutException]] after the
+   * will be completed with an [[akka.pattern.AskTimeoutException]] after the
    * given timeout has expired; this is independent from any timeout applied
    * while awaiting a result for this future (i.e. in
    * `Await.result(..., timeout)`).
@@ -79,7 +78,7 @@ trait AskSupport {
         actorRef.tell(message)
         Promise.failed(new AskTimeoutException("not asking with negative timeout"))(provider.dispatcher)
       } else {
-        val a = createAsker(provider, timeout)
+        val a = PromiseActorRef(provider, timeout)
         actorRef.tell(message, a)
         a.result
       }
@@ -95,7 +94,7 @@ trait AskSupport {
      * Sends a message asynchronously and returns a [[akka.dispatch.Future]]
      * holding the eventual reply message; this means that the target actor
      * needs to send the result to the `sender` reference provided. The Future
-     * will be completed with an [[akka.actor.AskTimeoutException]] after the
+     * will be completed with an [[akka.pattern.AskTimeoutException]] after the
      * given timeout has expired; this is independent from any timeout applied
      * while awaiting a result for this future (i.e. in
      * `Await.result(..., timeout)`).
@@ -125,7 +124,7 @@ trait AskSupport {
      * Sends a message asynchronously and returns a [[akka.dispatch.Future]]
      * holding the eventual reply message; this means that the target actor
      * needs to send the result to the `sender` reference provided. The Future
-     * will be completed with an [[akka.actor.AskTimeoutException]] after the
+     * will be completed with an [[akka.pattern.AskTimeoutException]] after the
      * given timeout has expired; this is independent from any timeout applied
      * while awaiting a result for this future (i.e. in
      * `Await.result(..., timeout)`).
@@ -151,51 +150,162 @@ trait AskSupport {
      */
     def ?(message: Any)(implicit timeout: Timeout): Future[Any] = akka.pattern.ask(actorRef, message)(timeout)
   }
+}
+
+/**
+ * Akka private optimized representation of the temporary actor spawned to
+ * receive the reply to an "ask" operation.
+ *
+ * INTERNAL API
+ */
+private[akka] final class PromiseActorRef private (val provider: ActorRefProvider, val result: Promise[Any])
+  extends MinimalActorRef {
+  import PromiseActorRef._
+  import AbstractPromiseActorRef.stateOffset
+  import AbstractPromiseActorRef.watchedByOffset
 
   /**
-   * Akka private optimized representation of the temporary actor spawned to
-   * receive the reply to an "ask" operation.
+   * As an optimization for the common (local) case we only register this PromiseActorRef
+   * with the provider when the `path` member is actually queried, which happens during
+   * serialization (but also during a simple call to `toString`, `equals` or `hashCode`!).
+   *
+   * Defined states:
+   * null                  => started, path not yet created
+   * Registering           => currently creating temp path and registering it
+   * path: ActorPath       => path is available and was registered
+   * StoppedWithPath(path) => stopped, path available
+   * Stopped               => stopped, path not yet created
    */
-  private[akka] final class PromiseActorRef(
-    val provider: ActorRefProvider,
-    val path: ActorPath,
-    override val getParent: InternalActorRef,
-    val result: Promise[Any],
-    val deathWatch: DeathWatch) extends MinimalActorRef {
+  @volatile
+  private[this] var _stateDoNotCallMeDirectly: AnyRef = _
 
-    final val running = new AtomicBoolean(true)
+  @volatile
+  private[this] var _watchedByDoNotCallMeDirectly: Set[ActorRef] = ActorCell.emptyActorRefSet
 
-    override def !(message: Any)(implicit sender: ActorRef = null): Unit = if (running.get) message match {
-      case Status.Success(r) ⇒ result.success(r)
-      case Status.Failure(f) ⇒ result.failure(f)
-      case other             ⇒ result.success(other)
-    }
+  @inline
+  private[this] def watchedBy: Set[ActorRef] = Unsafe.instance.getObjectVolatile(this, watchedByOffset).asInstanceOf[Set[ActorRef]]
 
-    override def sendSystemMessage(message: SystemMessage): Unit = message match {
-      case _: Terminate ⇒ stop()
-      case _            ⇒
-    }
+  @inline
+  private[this] def updateWatchedBy(oldWatchedBy: Set[ActorRef], newWatchedBy: Set[ActorRef]): Boolean =
+    Unsafe.instance.compareAndSwapObject(this, watchedByOffset, oldWatchedBy, newWatchedBy)
 
-    override def isTerminated = result.isCompleted
-
-    override def stop(): Unit = if (running.getAndSet(false)) {
-      deathWatch.publish(Terminated(this))
-    }
+  @tailrec // Returns false if the Promise is already completed
+  private[this] final def addWatcher(watcher: ActorRef): Boolean = watchedBy match {
+    case null  ⇒ false
+    case other ⇒ updateWatchedBy(other, other + watcher) || addWatcher(watcher)
   }
 
+  @tailrec
+  private[this] final def remWatcher(watcher: ActorRef): Unit = watchedBy match {
+    case null  ⇒ ()
+    case other ⇒ if (!updateWatchedBy(other, other - watcher)) remWatcher(watcher)
+  }
+
+  @tailrec
+  private[this] final def clearWatchers(): Set[ActorRef] = watchedBy match {
+    case null  ⇒ ActorCell.emptyActorRefSet
+    case other ⇒ if (!updateWatchedBy(other, null)) clearWatchers() else other
+  }
+
+  @inline
+  private[this] def state: AnyRef = Unsafe.instance.getObjectVolatile(this, stateOffset)
+
+  @inline
+  private[this] def updateState(oldState: AnyRef, newState: AnyRef): Boolean =
+    Unsafe.instance.compareAndSwapObject(this, stateOffset, oldState, newState)
+
+  @inline
+  private[this] def setState(newState: AnyRef): Unit = Unsafe.instance.putObjectVolatile(this, stateOffset, newState)
+
+  override def getParent: InternalActorRef = provider.tempContainer
+
   /**
-   * INTERNAL AKKA USE ONLY
+   * Contract of this method:
+   * Must always return the same ActorPath, which must have
+   * been registered if we haven't been stopped yet.
    */
-  private[akka] def createAsker(provider: ActorRefProvider, timeout: Timeout): PromiseActorRef = {
-    val path = provider.tempPath()
-    val result = Promise[Any]()(provider.dispatcher)
-    val a = new PromiseActorRef(provider, path, provider.tempContainer, result, provider.deathWatch)
-    provider.registerTempActor(a, path)
-    val f = provider.scheduler.scheduleOnce(timeout.duration) { result.failure(new AskTimeoutException("Timed out")) }
-    result onComplete { _ ⇒
-      try { a.stop(); f.cancel() }
-      finally { provider.unregisterTempActor(path) }
+  @tailrec
+  def path: ActorPath = state match {
+    case null ⇒
+      if (updateState(null, Registering)) {
+        var p: ActorPath = null
+        try {
+          p = provider.tempPath()
+          provider.registerTempActor(this, p)
+          p
+        } finally { setState(p) }
+      } else path
+    case p: ActorPath       ⇒ p
+    case StoppedWithPath(p) ⇒ p
+    case Stopped ⇒
+      // even if we are already stopped we still need to produce a proper path
+      updateState(Stopped, StoppedWithPath(provider.tempPath()))
+      path
+    case Registering ⇒ path // spin until registration is completed
+  }
+
+  override def !(message: Any)(implicit sender: ActorRef = null): Unit = state match {
+    case Stopped | _: StoppedWithPath ⇒ provider.deadLetters ! message
+    case _ ⇒ if (!(result.tryComplete {
+      message match {
+        case Status.Success(r) ⇒ Right(r)
+        case Status.Failure(f) ⇒ Left(f)
+        case other             ⇒ Right(other)
+      }
+    })) provider.deadLetters ! message
+  }
+
+  override def sendSystemMessage(message: SystemMessage): Unit = message match {
+    case _: Terminate ⇒ stop()
+    case Watch(watchee, watcher) ⇒
+      if (watchee == this && watcher != this) {
+        if (!addWatcher(watcher)) watcher ! Terminated(watchee)(existenceConfirmed = true)
+      } else System.err.println("BUG: illegal Watch(%s,%s) for %s".format(watchee, watcher, this))
+    case Unwatch(watchee, watcher) ⇒
+      if (watchee == this && watcher != this) remWatcher(watcher)
+      else System.err.println("BUG: illegal Unwatch(%s,%s) for %s".format(watchee, watcher, this))
+    case _ ⇒
+  }
+
+  override def isTerminated: Boolean = state match {
+    case Stopped | _: StoppedWithPath ⇒ true
+    case _                            ⇒ false
+  }
+
+  @tailrec
+  override def stop(): Unit = {
+    def ensureCompleted(): Unit = {
+      if (!result.isCompleted) result.tryComplete(Left(new ActorKilledException("Stopped")))
+      val watchers = clearWatchers()
+      if (!watchers.isEmpty) {
+        val termination = Terminated(this)(existenceConfirmed = true)
+        watchers foreach { w ⇒ try w.tell(termination, this) catch { case NonFatal(t) ⇒ /* FIXME LOG THIS */ } }
+      }
     }
+    state match {
+      case null ⇒ // if path was never queried nobody can possibly be watching us, so we don't have to publish termination either
+        if (updateState(null, Stopped)) ensureCompleted() else stop()
+      case p: ActorPath ⇒
+        if (updateState(p, StoppedWithPath(p))) { try ensureCompleted() finally provider.unregisterTempActor(p) } else stop()
+      case Stopped | _: StoppedWithPath ⇒ // already stopped
+      case Registering                  ⇒ stop() // spin until registration is completed before stopping
+    }
+  }
+}
+
+/**
+ * INTERNAL API
+ */
+private[akka] object PromiseActorRef {
+  private case object Registering
+  private case object Stopped
+  private case class StoppedWithPath(path: ActorPath)
+
+  def apply(provider: ActorRefProvider, timeout: Timeout): PromiseActorRef = {
+    val result = Promise[Any]()(provider.dispatcher)
+    val a = new PromiseActorRef(provider, result)
+    val f = provider.scheduler.scheduleOnce(timeout.duration) { result.tryComplete(Left(new AskTimeoutException("Timed out"))) }
+    result onComplete { _ ⇒ try a.stop() finally f.cancel() }
     a
   }
 }

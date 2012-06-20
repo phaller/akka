@@ -4,60 +4,112 @@
 
 package akka.actor
 
-import akka.config.ConfigurationException
 import akka.event._
 import akka.dispatch._
 import akka.pattern.ask
-import org.jboss.netty.akka.util.HashedWheelTimer
-import java.util.concurrent.TimeUnit.MILLISECONDS
-import com.typesafe.config.Config
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{ Config, ConfigFactory }
 import scala.annotation.tailrec
-import org.jboss.netty.akka.util.internal.ConcurrentIdentityHashMap
 import java.io.Closeable
-import akka.dispatch.Await.Awaitable
-import akka.dispatch.Await.CanAwait
-import java.util.concurrent.{ CountDownLatch, TimeoutException, RejectedExecutionException }
+import akka.dispatch.Await.{ Awaitable, CanAwait }
 import akka.util._
-import collection.immutable.Stack
+import akka.util.internal.{ HashedWheelTimer, ConcurrentIdentityHashMap }
+import java.util.concurrent.{ ThreadFactory, CountDownLatch, TimeoutException, RejectedExecutionException }
+import java.util.concurrent.TimeUnit.MILLISECONDS
 
 object ActorSystem {
 
-  val Version = "2.0-SNAPSHOT"
+  val Version: String = "2.1-SNAPSHOT"
 
-  val EnvHome = System.getenv("AKKA_HOME") match {
+  val EnvHome: Option[String] = System.getenv("AKKA_HOME") match {
     case null | "" | "." ⇒ None
     case value           ⇒ Some(value)
   }
 
-  val SystemHome = System.getProperty("akka.home") match {
+  val SystemHome: Option[String] = System.getProperty("akka.home") match {
     case null | "" ⇒ None
     case value     ⇒ Some(value)
   }
 
-  val GlobalHome = SystemHome orElse EnvHome
-
-  def create(name: String, config: Config): ActorSystem = apply(name, config)
-  def apply(name: String, config: Config): ActorSystem = new ActorSystemImpl(name, config).start()
+  val GlobalHome: Option[String] = SystemHome orElse EnvHome
 
   /**
-   * Uses the standard default Config from ConfigFactory.load(), since none is provided.
+   * Creates a new ActorSystem with the name "default",
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
+   * Then it loads the default reference configuration using the ClassLoader.
+   */
+  def create(): ActorSystem = apply()
+
+  /**
+   * Creates a new ActorSystem with the specified name,
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
+   * Then it loads the default reference configuration using the ClassLoader.
    */
   def create(name: String): ActorSystem = apply(name)
 
   /**
-   * Uses the standard default Config from ConfigFactory.load(), since none is provided.
+   * Creates a new ActorSystem with the name "default", and the specified Config, then
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
    */
-  def apply(name: String): ActorSystem = apply(name, ConfigFactory.load())
+  def create(name: String, config: Config): ActorSystem = apply(name, config)
 
-  def create(): ActorSystem = apply()
+  /**
+   * Creates a new ActorSystem with the name "default", the specified Config, and specified ClassLoader
+   */
+  def create(name: String, config: Config, classLoader: ClassLoader): ActorSystem = apply(name, config, classLoader)
+
+  /**
+   * Creates a new ActorSystem with the name "default",
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
+   * Then it loads the default reference configuration using the ClassLoader.
+   */
   def apply(): ActorSystem = apply("default")
 
-  class Settings(cfg: Config, final val name: String) {
+  /**
+   * Creates a new ActorSystem with the specified name,
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
+   * Then it loads the default reference configuration using the ClassLoader.
+   */
+  def apply(name: String): ActorSystem = {
+    val classLoader = findClassLoader()
+    apply(name, ConfigFactory.load(classLoader), classLoader)
+  }
 
+  /**
+   * Creates a new ActorSystem with the name "default", and the specified Config, then
+   * obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader,
+   * then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader
+   * associated with the ActorSystem class.
+   */
+  def apply(name: String, config: Config): ActorSystem = apply(name, config, findClassLoader())
+
+  /**
+   * Creates a new ActorSystem with the name "default", the specified Config, and specified ClassLoader
+   */
+  def apply(name: String, config: Config, classLoader: ClassLoader): ActorSystem = new ActorSystemImpl(name, config, classLoader).start()
+
+  /**
+   * Settings are the overall ActorSystem Settings which also provides a convenient access to the Config object.
+   *
+   * For more detailed information about the different possible configuration options, look in the Akka Documentation under "Configuration"
+   */
+  class Settings(classLoader: ClassLoader, cfg: Config, final val name: String) {
+
+    /**
+     * The backing Config of this ActorSystem's Settings
+     */
     final val config: Config = {
-      val config = cfg.withFallback(ConfigFactory.defaultReference)
-      config.checkValid(ConfigFactory.defaultReference, "akka")
+      val config = cfg.withFallback(ConfigFactory.defaultReference(classLoader))
+      config.checkValid(ConfigFactory.defaultReference(classLoader), "akka")
       config
     }
 
@@ -65,23 +117,24 @@ object ActorSystem {
     import config._
 
     final val ConfigVersion = getString("akka.version")
-
     final val ProviderClass = getString("akka.actor.provider")
-
     final val CreationTimeout = Timeout(Duration(getMilliseconds("akka.actor.creation-timeout"), MILLISECONDS))
-    final val ReaperInterval = Duration(getMilliseconds("akka.actor.reaper-interval"), MILLISECONDS)
+
     final val SerializeAllMessages = getBoolean("akka.actor.serialize-messages")
     final val SerializeAllCreators = getBoolean("akka.actor.serialize-creators")
 
     final val LogLevel = getString("akka.loglevel")
     final val StdoutLogLevel = getString("akka.stdout-loglevel")
     final val EventHandlers: Seq[String] = getStringList("akka.event-handlers").asScala
+    final val EventHandlerStartTimeout = Timeout(Duration(getMilliseconds("akka.event-handler-startup-timeout"), MILLISECONDS))
     final val LogConfigOnStart = config.getBoolean("akka.log-config-on-start")
+
     final val AddLoggingReceive = getBoolean("akka.actor.debug.receive")
     final val DebugAutoReceive = getBoolean("akka.actor.debug.autoreceive")
     final val DebugLifecycle = getBoolean("akka.actor.debug.lifecycle")
     final val FsmDebugEvent = getBoolean("akka.actor.debug.fsm")
     final val DebugEventStream = getBoolean("akka.actor.debug.event-stream")
+    final val DebugUnhandledMessage = getBoolean("akka.actor.debug.unhandled")
 
     final val Home = config.getString("akka.home") match {
       case "" ⇒ None
@@ -94,9 +147,33 @@ object ActorSystem {
     final val JvmExitOnFatalError = getBoolean("akka.jvm-exit-on-fatal-error")
 
     if (ConfigVersion != Version)
-      throw new ConfigurationException("Akka JAR version [" + Version + "] does not match the provided config version [" + ConfigVersion + "]")
+      throw new akka.ConfigurationException("Akka JAR version [" + Version + "] does not match the provided config version [" + ConfigVersion + "]")
 
+    /**
+     * Returns the String representation of the Config that this Settings is backed by
+     */
     override def toString: String = config.root.render
+  }
+
+  /**
+   * INTERNAL USE ONLY
+   */
+  private[akka] def findClassLoader(): ClassLoader = {
+    def findCaller(get: Int ⇒ Class[_]): ClassLoader =
+      Iterator.from(2 /*is the magic number, promise*/ ).map(get) dropWhile { c ⇒
+        c != null &&
+          (c.getName.startsWith("akka.actor.ActorSystem") ||
+            c.getName.startsWith("scala.Option") ||
+            c.getName.startsWith("scala.collection.Iterator") ||
+            c.getName.startsWith("akka.util.Reflect"))
+      } next () match {
+        case null ⇒ getClass.getClassLoader
+        case c    ⇒ c.getClassLoader
+      }
+
+    Option(Thread.currentThread.getContextClassLoader) orElse
+      (Reflect.getCallerClass map findCaller) getOrElse
+      getClass.getClassLoader
   }
 }
 
@@ -130,7 +207,7 @@ object ActorSystem {
  *
  * Where no name is given explicitly, one will be automatically generated.
  *
- * <b><i>Important Notice:</i></o>
+ * <b><i>Important Notice:</i></b>
  *
  * This class is not meant to be extended by user code. If you want to
  * actually roll your own Akka, it will probably be better to look into
@@ -182,12 +259,12 @@ abstract class ActorSystem extends ActorRefFactory {
   /**
    * Start-up time in milliseconds since the epoch.
    */
-  val startTime = System.currentTimeMillis
+  val startTime: Long = System.currentTimeMillis
 
   /**
    * Up-time of this actor system in seconds.
    */
-  def uptime = (System.currentTimeMillis - startTime) / 1000
+  def uptime: Long = (System.currentTimeMillis - startTime) / 1000
 
   /**
    * Main event bus of this actor system, used for example for logging.
@@ -222,13 +299,15 @@ abstract class ActorSystem extends ActorRefFactory {
    * Default dispatcher as configured. This dispatcher is used for all actors
    * in the actor system which do not have a different dispatcher configured
    * explicitly.
+   * Importing this member will place the default MessageDispatcher in scope.
    */
-  def dispatcher: MessageDispatcher
+  implicit def dispatcher: MessageDispatcher
 
   /**
-   * Register a block of code (callback) to run after all actors in this actor system have
-   * been stopped. Multiple code blocks may be registered by calling this method multiple times.
-   * The callbacks will be run sequentilly in reverse order of registration, i.e.
+   * Register a block of code (callback) to run after ActorSystem.shutdown has been issued and
+   * all actors in this actor system have been stopped.
+   * Multiple code blocks may be registered by calling this method multiple times.
+   * The callbacks will be run sequentially in reverse order of registration, i.e.
    * last registration is run first.
    *
    * @throws a RejectedExecutionException if the System has already shut down or if shutdown has been initiated.
@@ -238,9 +317,10 @@ abstract class ActorSystem extends ActorRefFactory {
   def registerOnTermination[T](code: ⇒ T): Unit
 
   /**
-   * Register a block of code (callback) to run after all actors in this actor system have
-   * been stopped. Multiple code blocks may be registered by calling this method multiple times.
-   * The callbacks will be run sequentilly in reverse order of registration, i.e.
+   * Register a block of code (callback) to run after ActorSystem.shutdown has been issued and
+   * all actors in this actor system have been stopped.
+   * Multiple code blocks may be registered by calling this method multiple times.
+   * The callbacks will be run sequentially in reverse order of registration, i.e.
    * last registration is run first.
    *
    * @throws a RejectedExecutionException if the System has already shut down or if shutdown has been initiated.
@@ -253,6 +333,8 @@ abstract class ActorSystem extends ActorRefFactory {
    * Block current thread until the system has been shutdown, or the specified
    * timeout has elapsed. This will block until after all on termination
    * callbacks have been run.
+   *
+   * @throws TimeoutException in case of timeout
    */
   def awaitTermination(timeout: Duration): Unit
 
@@ -269,6 +351,15 @@ abstract class ActorSystem extends ActorRefFactory {
    * termination handlers (see [[ActorSystem.registerOnTermination]]).
    */
   def shutdown(): Unit
+
+  /**
+   * Query the termination status: if it returns true, all callbacks have run
+   * and the ActorSystem has been fully stopped, i.e.
+   * `awaitTermination(0 seconds)` would return normally. If this method
+   * returns `false`, the status is actually unknown, since it might have
+   * changed since you queried it.
+   */
+  def isTerminated: Boolean
 
   /**
    * Registers the provided extension and creates its payload, if this extension isn't already registered
@@ -295,7 +386,7 @@ abstract class ActorSystem extends ActorRefFactory {
 /**
  * More powerful interface to the actor system’s implementation which is presented to extensions (see [[akka.actor.Extension]]).
  *
- * <b><i>Important Notice:</i></o>
+ * <b><i>Important Notice:</i></b>
  *
  * This class is not meant to be extended by user code. If you want to
  * actually roll your own Akka, beware that you are completely on your own in
@@ -319,9 +410,9 @@ abstract class ExtendedActorSystem extends ActorSystem {
   def systemGuardian: InternalActorRef
 
   /**
-   * Implementation of the mechanism which is used for watch()/unwatch().
+   * A ThreadFactory that can be used if the transport needs to create any Threads
    */
-  def deathWatch: DeathWatch
+  def threadFactory: ThreadFactory
 
   /**
    * ClassLoader wrapper which is used for reflective accesses internally. This is set
@@ -333,85 +424,74 @@ abstract class ExtendedActorSystem extends ActorSystem {
   def dynamicAccess: DynamicAccess
 }
 
-class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Config) extends ExtendedActorSystem {
+private[akka] class ActorSystemImpl(val name: String, applicationConfig: Config, classLoader: ClassLoader) extends ExtendedActorSystem {
 
-  if (!name.matches("""^\w+$"""))
-    throw new IllegalArgumentException("invalid ActorSystem name [" + name + "], must contain only word characters (i.e. [a-zA-Z_0-9])")
+  if (!name.matches("""^[a-zA-Z0-9][a-zA-Z0-9-]*$"""))
+    throw new IllegalArgumentException(
+      "invalid ActorSystem name [" + name +
+        "], must contain only word characters (i.e. [a-zA-Z0-9] plus non-leading '-')")
 
   import ActorSystem._
 
-  final val settings: Settings = new Settings(applicationConfig, name)
+  final val settings: Settings = new Settings(classLoader, applicationConfig, name)
 
   protected def uncaughtExceptionHandler: Thread.UncaughtExceptionHandler =
     new Thread.UncaughtExceptionHandler() {
       def uncaughtException(thread: Thread, cause: Throwable): Unit = {
-        log.error(cause, "Uncaught error from thread [{}]", thread.getName)
         cause match {
-          case NonFatal(_) | _: InterruptedException ⇒
-          case _ if settings.JvmExitOnFatalError     ⇒ System.exit(-1)
-          case _                                     ⇒ shutdown()
+          case NonFatal(_) | _: InterruptedException ⇒ log.error(cause, "Uncaught error from thread [{}]", thread.getName)
+          case _ ⇒
+            if (settings.JvmExitOnFatalError) {
+              try {
+                log.error(cause, "Uncaught error from thread [{}] shutting down JVM since 'akka.jvm-exit-on-fatal-error' is enabled", thread.getName)
+                import System.err
+                err.print("Uncaught error from thread [")
+                err.print(thread.getName)
+                err.print("] shutting down JVM since 'akka.jvm-exit-on-fatal-error' is enabled for ActorSystem[")
+                err.print(name)
+                err.println("]")
+                cause.printStackTrace(System.err)
+                System.err.flush()
+              } finally {
+                System.exit(-1)
+              }
+            } else {
+              log.error(cause, "Uncaught fatal error from thread [{}] shutting down ActorSystem [{}]", thread.getName, name)
+              shutdown()
+            }
         }
       }
     }
 
   final val threadFactory: MonitorableThreadFactory =
-    MonitorableThreadFactory(name, settings.Daemonicity, Option(Thread.currentThread.getContextClassLoader), uncaughtExceptionHandler)
+    MonitorableThreadFactory(name, settings.Daemonicity, Option(classLoader), uncaughtExceptionHandler)
 
   /**
    * This is an extension point: by overriding this method, subclasses can
    * control all reflection activities of an actor system.
    */
-  protected def createDynamicAccess(): DynamicAccess = new ReflectiveDynamicAccess(findClassLoader)
-
-  protected def findClassLoader: ClassLoader = {
-    def findCaller(get: Int ⇒ Class[_]): ClassLoader = {
-      val frames = Iterator.from(2).map(get)
-      frames dropWhile { c ⇒
-        c != null &&
-          (c.getName.startsWith("akka.actor.ActorSystem") ||
-            c.getName.startsWith("scala.Option") ||
-            c.getName.startsWith("scala.collection.Iterator") ||
-            c.getName.startsWith("akka.util.Reflect"))
-      } next () match {
-        case null ⇒ getClass.getClassLoader
-        case c    ⇒ c.getClassLoader
-      }
-    }
-
-    Option(Thread.currentThread.getContextClassLoader) orElse
-      (Reflect.getCallerClass map findCaller) getOrElse
-      getClass.getClassLoader
-  }
+  protected def createDynamicAccess(): DynamicAccess = new ReflectiveDynamicAccess(classLoader)
 
   private val _pm: DynamicAccess = createDynamicAccess()
   def dynamicAccess: DynamicAccess = _pm
 
   def logConfiguration(): Unit = log.info(settings.toString)
 
-  protected def systemImpl = this
+  protected def systemImpl: ActorSystemImpl = this
 
   private[akka] def systemActorOf(props: Props, name: String): ActorRef = {
     implicit val timeout = settings.CreationTimeout
-    Await.result(systemGuardian ? CreateChild(props, name), timeout.duration) match {
-      case ref: ActorRef ⇒ ref
-      case ex: Exception ⇒ throw ex
-    }
+    Await.result((systemGuardian ? CreateChild(props, name)).mapTo[ActorRef], timeout.duration)
   }
 
   def actorOf(props: Props, name: String): ActorRef = {
     implicit val timeout = settings.CreationTimeout
-    Await.result(guardian ? CreateChild(props, name), timeout.duration) match {
-      case ref: ActorRef ⇒ ref
-      case ex: Exception ⇒ throw ex
-    }
+    Await.result((guardian ? CreateChild(props, name)).mapTo[ActorRef], timeout.duration)
   }
 
   def actorOf(props: Props): ActorRef = {
     implicit val timeout = settings.CreationTimeout
-    Await.result(guardian ? CreateRandomNameChild(props), timeout.duration) match {
-      case ref: ActorRef ⇒ ref
-      case ex: Exception ⇒ throw ex
-    }
+    Await.result((guardian ? CreateRandomNameChild(props)).mapTo[ActorRef], timeout.duration)
   }
 
   def stop(actor: ActorRef): Unit = {
@@ -452,21 +532,26 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
 
   def deadLetters: ActorRef = provider.deadLetters
 
-  val deadLetterMailbox: Mailbox = new Mailbox(null) {
+  //FIXME Why do we need this at all?
+  val deadLetterQueue: MessageQueue = new MessageQueue {
+    def enqueue(receiver: ActorRef, envelope: Envelope): Unit =
+      deadLetters ! DeadLetter(envelope.message, envelope.sender, receiver)
+    def dequeue() = null
+    def hasMessages = false
+    def numberOfMessages = 0
+    def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = ()
+  }
+  //FIXME Why do we need this at all?
+  val deadLetterMailbox: Mailbox = new Mailbox(null, deadLetterQueue) {
     becomeClosed()
-    override def enqueue(receiver: ActorRef, envelope: Envelope) { deadLetters ! DeadLetter(envelope.message, envelope.sender, receiver) }
-    override def dequeue() = null
-    override def systemEnqueue(receiver: ActorRef, handle: SystemMessage) { deadLetters ! DeadLetter(handle, receiver, receiver) }
-    override def systemDrain(): SystemMessage = null
-    override def hasMessages = false
-    override def hasSystemMessages = false
-    override def numberOfMessages = 0
+    def systemEnqueue(receiver: ActorRef, handle: SystemMessage): Unit =
+      deadLetters ! DeadLetter(handle, receiver, receiver)
+    def systemDrain(newContents: SystemMessage): SystemMessage = null
+    def hasSystemMessages = false
   }
 
-  def locker: Locker = provider.locker
-
   val dispatchers: Dispatchers = new Dispatchers(settings, DefaultDispatcherPrerequisites(
-    threadFactory, eventStream, deadLetterMailbox, scheduler, dynamicAccess))
+    threadFactory, eventStream, deadLetterMailbox, scheduler, dynamicAccess, settings))
 
   val dispatcher: MessageDispatcher = dispatchers.defaultGlobalDispatcher
 
@@ -474,7 +559,6 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
   def lookupRoot: InternalActorRef = provider.rootGuardian
   def guardian: InternalActorRef = provider.guardian
   def systemGuardian: InternalActorRef = provider.systemGuardian
-  def deathWatch: DeathWatch = provider.deathWatch
 
   def /(actorName: String): ActorPath = guardian.path / actorName
   def /(path: Iterable[String]): ActorPath = guardian.path / path
@@ -499,8 +583,9 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
   def registerOnTermination(code: Runnable) { terminationCallbacks.add(code) }
   def awaitTermination(timeout: Duration) { Await.ready(terminationCallbacks, timeout) }
   def awaitTermination() = awaitTermination(Duration.Inf)
+  def isTerminated = terminationCallbacks.isTerminated
 
-  def shutdown(): Unit = stop(guardian)
+  def shutdown(): Unit = guardian.stop()
 
   /**
    * Create the scheduler service. This one needs one special behavior: if
@@ -599,8 +684,8 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
 
   final class TerminationCallbacks extends Runnable with Awaitable[Unit] {
     private val lock = new ReentrantGuard
-    private var callbacks: Stack[Runnable] = _ //non-volatile since guarded by the lock
-    lock withGuard { callbacks = Stack.empty[Runnable] }
+    private var callbacks: List[Runnable] = _ //non-volatile since guarded by the lock
+    lock withGuard { callbacks = Nil }
 
     private val latch = new CountDownLatch(1)
 
@@ -609,17 +694,17 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
         case 0 ⇒ throw new RejectedExecutionException("Must be called prior to system shutdown.")
         case _ ⇒ lock withGuard {
           if (latch.getCount == 0) throw new RejectedExecutionException("Must be called prior to system shutdown.")
-          else callbacks = callbacks.push(callback)
+          else callbacks ::= callback
         }
       }
     }
 
     final def run(): Unit = lock withGuard {
-      @tailrec def runNext(c: Stack[Runnable]): Stack[Runnable] = c.headOption match {
-        case None ⇒ Stack.empty[Runnable]
-        case Some(callback) ⇒
-          try callback.run() catch { case e ⇒ log.error(e, "Failed to run termination callback, due to [{}]", e.getMessage) }
-          runNext(c.pop)
+      @tailrec def runNext(c: List[Runnable]): List[Runnable] = c match {
+        case Nil ⇒ Nil
+        case callback :: rest ⇒
+          try callback.run() catch { case NonFatal(e) ⇒ log.error(e, "Failed to run termination callback, due to [{}]", e.getMessage) }
+          runNext(rest)
       }
       try { callbacks = runNext(callbacks) } finally latch.countDown()
     }
@@ -634,5 +719,7 @@ class ActorSystemImpl protected[akka] (val name: String, applicationConfig: Conf
     }
 
     final def result(atMost: Duration)(implicit permit: CanAwait): Unit = ready(atMost)
+
+    final def isTerminated: Boolean = latch.getCount == 0
   }
 }

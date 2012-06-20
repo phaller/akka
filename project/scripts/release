@@ -2,17 +2,17 @@
 #
 # Release script for Akka.
 #
-# To run this script you need a user account on akka.io and contributor access
-# to github.com/jboner/akka.
+# To run this script you need a user account on repo.akka.io and contributor access
+# to github.com/akka/akka.
 #
-# If your username on akka.io is different from your local username then you can
-# configure ssh to always associate a particular username with akka.io by adding
+# If your username on repo.akka.io is different from your local username then you can
+# configure ssh to always associate a particular username with repo.akka.io by adding
 # the following to .ssh/config:
-#   Host akka.io
-#   User <username on akka.io>
+#   Host repo.akka.io
+#   User <username on repo.akka.io>
 
 # defaults
-declare -r default_server="akka.io"
+declare -r default_server="repo.akka.io"
 declare -r default_path="/akka/www"
 
 # settings
@@ -22,7 +22,7 @@ declare release_path=${default_path}
 declare -r unzipped_dir="target/dist/unzipped"
 
 # flags
-unset run_tests dry_run
+unset run_tests dry_run no_revert
 
 # get the source location for this script; handles symlinks
 function get_script_path {
@@ -47,6 +47,7 @@ Usage: ${script_name} [options] VERSION
   -s | --server SERVER   Set the release server (default ${default_server})
   -p | --path PATH       Set the path on the release server (default ${default_path})
   -n | --dry-run         Build everything but do not push the release
+  -r | --no-revert       On dry-run don't revert git commits and tags
 EOM
 }
 
@@ -79,6 +80,7 @@ while true; do
     -s | --server ) release_server=$2; shift 2 ;;
     -p | --path ) release_path=$2; shift 2 ;;
     -n | --dry-run) dry_run=true; shift ;;
+    -r | --no-revert) no_revert=true; shift ;;
     * ) break ;;
   esac
 done
@@ -90,6 +92,8 @@ fi
 
 declare -r version=$1
 declare -r publish_path="${release_server}:${release_path}"
+
+[[ `java -version 2>&1 | head -1 | cut -d ' ' -f3 | cut -d '.' -f2` -eq 6 ]] || fail "Java version is not 1.6"
 
 # check for a git command
 type -P git &> /dev/null || fail "git command not found"
@@ -217,11 +221,18 @@ echolog "Creating gzipped tar download..."
 try tar -cz -C ${unzipped_dir} -f ${release_dir}/downloads/akka-${version}.tgz akka-${version}
 echolog "Successfully created local release"
 
+# check binary compatibility for dry run
+if [ $dry_run ]; then
+  echodry "Running migration manager report..."
+  sbt mima-report-binary-issues
+  echodry "Finished migration manager report"
+fi
+
 # commit and tag this release
 echolog "Committing and tagging..."
 try git add .
 try git commit -am "Update version for release ${version}"
-try git tag -m "Version ${version}" v${version}
+try git tag -am "Version ${version}" v${version}
 
 # the point of no return... we're now pushing out to servers
 
@@ -272,7 +283,11 @@ else
 fi
 
 if [ $dry_run ]; then
-  git_cleanup
+  if [ $no_revert ]; then
+    echodry "No revert: git branch ${release_branch} and git tag v${version} remain"
+  else
+    git_cleanup
+  fi
   echodry "Successfully created release ${version}"
   echodry "See ${release_dir}"
 else

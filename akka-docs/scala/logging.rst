@@ -4,9 +4,6 @@
  Logging (Scala)
 #################
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
 
 How to Log
 ==========
@@ -14,7 +11,7 @@ How to Log
 Create a ``LoggingAdapter`` and use the ``error``, ``warning``, ``info``, or ``debug`` methods,
 as illustrated in this example:
 
-.. includecode:: code/akka/docs/event/LoggingDocSpec.scala
+.. includecode:: code/docs/event/LoggingDocSpec.scala
    :include: my-actor
 
 For convenience you can mixin the ``log`` member into actors, instead of defining it as above.
@@ -34,8 +31,20 @@ The source object is translated to a String according to the following rules:
   * and in all other cases a compile error occurs unless and implicit
     :class:`LogSource[T]` is in scope for the type in question.
 
-The log message may contain argument placeholders ``{}``, which will be substituted if the log level
-is enabled.
+The log message may contain argument placeholders ``{}``, which will be
+substituted if the log level is enabled. Giving more arguments as there are
+placeholders results in a warning being appended to the log statement (i.e. on
+the same line with the same severity). You may pass a Java array as the only
+substitution argument to have its elements be treated individually:
+
+.. includecode:: code/docs/event/LoggingDocSpec.scala#array
+
+The Java :class:`Class` of the log source is also included in the generated
+:class:`LogEvent`. In case of a simple string this is replaced with a “marker”
+class :class:`akka.event.DummyClassForStringSources` in order to allow special
+treatment of this case, e.g. in the SLF4J event listener which will then use
+the string instead of the class’ name for looking up the logger instance to
+use.
 
 Auxiliary logging options
 -------------------------
@@ -67,10 +76,12 @@ by Actors that use akka.event.LoggingReceive:
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable function of LoggingReceive, which is to log any received message at
-        # DEBUG level
-        receive = on
+      actor {
+        debug {
+          # enable function of LoggingReceive, which is to log any received message at
+          # DEBUG level
+          receive = on
+        }
       }
     }
 
@@ -80,9 +91,11 @@ by Actors:
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of all AutoReceiveMessages (Kill, PoisonPill and the like)
-        autoreceive = on
+      actor {
+        debug {
+          # enable DEBUG logging of all AutoReceiveMessages (Kill, PoisonPill and the like)
+          autoreceive = on
+        }
       }
     }
 
@@ -91,9 +104,11 @@ If you want very detailed logging of all lifecycle changes of Actors (restarts, 
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of actor lifecycle changes
-        lifecycle = on
+      actor {
+        debug {
+          # enable DEBUG logging of actor lifecycle changes
+          lifecycle = on
+        }
       }
     }
 
@@ -102,9 +117,11 @@ If you want very detailed logging of all events, transitions and timers of FSM A
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of all LoggingFSMs for events, transitions and timers
-        fsm = on
+      actor {
+        debug {
+          # enable DEBUG logging of all LoggingFSMs for events, transitions and timers
+          fsm = on
+        }
       }
     }
 
@@ -113,9 +130,11 @@ If you want to monitor subscriptions (subscribe/unsubscribe) on the ActorSystem.
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of subscription changes on the eventStream
-        event-stream = on
+      actor {
+        debug {
+          # enable DEBUG logging of subscription changes on the eventStream
+          event-stream = on
+        }
       }
     }
 
@@ -157,7 +176,7 @@ using implicit parameters and thus fully customizable: simply create your own
 instance of :class:`LogSource[T]` and have it in scope when creating the
 logger.
 
-.. includecode:: code/akka/docs/event/LoggingDocSpec.scala#my-source
+.. includecode:: code/docs/event/LoggingDocSpec.scala#my-source
 
 This example creates a log source which mimics traditional usage of Java
 loggers, which are based upon the originating object’s class name as log
@@ -173,7 +192,7 @@ purposes as it contains exactly the default behavior.
 
   The SLF4J event listener treats this case specially (using the actual string
   to look up the logger instance to use instead of the class’ name), and you
-  might want to do this also in case you implement your own loggin adapter.
+  might want to do this also in case you implement your own logging adapter.
 
 Event Handler
 =============
@@ -198,7 +217,7 @@ event handler available in the 'akka-slf4j' module.
 
 Example of creating a listener:
 
-.. includecode:: code/akka/docs/event/LoggingDocSpec.scala
+.. includecode:: code/docs/event/LoggingDocSpec.scala
    :include: my-event-listener
 
 .. _slf4j-scala:
@@ -211,7 +230,7 @@ It has one single dependency; the slf4j-api jar. In runtime you also need a SLF4
 
   .. code-block:: scala
 
-     lazy val logback = "ch.qos.logback" % "logback-classic" % "1.0.0" % "runtime"
+     lazy val logback = "ch.qos.logback" % "logback-classic" % "1.0.4" % "runtime"
 
 
 You need to enable the Slf4jEventHandler in the 'event-handlers' element in
@@ -234,7 +253,7 @@ the first case and ``LoggerFactory.getLogger(s: String)`` in the second).
 
 .. note::
 
-  Beware that the the actor system’s name is appended to a :class:`String` log
+  Beware that the actor system’s name is appended to a :class:`String` log
   source if the LoggingAdapter was created giving an :class:`ActorSystem` to
   the factory. If this is not intended, give a :class:`LoggingBus` instead as
   shown below:

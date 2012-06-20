@@ -4,10 +4,6 @@
 Routing (Java)
 ==============
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
-
 A Router is an actor that routes incoming messages to outbound actors.
 The router routes the messages sent to it to its underlying actors called 'routees'.
 
@@ -25,19 +21,24 @@ Routers In Action
 
 This is an example of how to create a router that is defined in configuration:
 
-.. includecode:: ../scala/code/akka/docs/routing/RouterViaConfigExample.scala#config
+.. includecode:: ../scala/code/docs/routing/RouterViaConfigExample.scala#config
 
-.. includecode:: code/akka/docs/jrouting/RouterViaConfigExample.java#configurableRouting
+.. includecode:: code/docs/jrouting/RouterViaConfigExample.java#configurableRouting
 
-This is an example of how to programatically create a router and set the number of routees it should create:
+This is an example of how to programmatically create a router and set the number of routees it should create:
 
-.. includecode:: code/akka/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingNrOfInstances
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingNrOfInstances
 
 You can also give the router already created routees as in:
 
-.. includecode:: code/akka/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingRoutees
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingRoutees
 
-When you create a router programatically you define the number of routees *or* you pass already created routees to it.
+It should be noted that no actor factory or class needs to be provided in this
+case, as the ``Router`` will not create any children on its own (which is not
+true anymore when using a resizer). The routees can also be specified by giving
+their path strings.
+
+When you create a router programmatically you define the number of routees *or* you pass already created routees to it.
 If you send both parameters to the router *only* the latter will be used, i.e. ``nrOfInstances`` is disregarded.
 
 *It is also worth pointing out that if you define the ``router`` in the
@@ -52,7 +53,19 @@ Once you have the router actor it is just to send messages to it as you would to
 
   router.tell(new MyMsg());
 
-The router will apply its behavior to the message it receives and forward it to the routees.
+The router will forward the message to its routees according to its routing policy.
+
+Remotely Deploying Routees
+**************************
+
+In addition to being able to supply looked-up remote actors as routees, you can
+make the router deploy its created children on a set of remote hosts; this will
+be done in round-robin fashion. In order to do that, wrap the router
+configuration in a :class:`RemoteRouterConfig`, attaching the remote addresses of
+the nodes to deploy to. Naturally, this requires your to include the
+``akka-remote`` module on your classpath:
+
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#remoteRoutees
 
 How Routing is Designed within Akka
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -82,9 +95,9 @@ deterministic fashion. Since each actor knows its own external representation
 as well as that of its parent, the routees decide where replies should be sent
 when reacting to a message:
 
-.. includecode:: code/akka/docs/jrouting/RouterViaProgramExample.java#reply-with-parent
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#reply-with-parent
 
-.. includecode:: code/akka/docs/jrouting/RouterViaProgramExample.java#reply-with-self
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#reply-with-self
 
 It is apparent now why routing needs to be enabled in code rather than being
 possible to “bolt on” later: whether or not an actor is routed means a change
@@ -92,24 +105,53 @@ to the actor hierarchy, changing the actor paths of all children of the router.
 The routees especially do need to know that they are routed to in order to
 choose the sender reference for any messages they dispatch as shown above.
 
+Routers vs. Supervision
+^^^^^^^^^^^^^^^^^^^^^^^
+
+As explained in the previous section, routers create new actor instances as
+children of the “head” router, who therefor also is their supervisor. The
+supervisor strategy of this actor can be configured by means of the
+:meth:`RouterConfig.supervisorStrategy` property, which is supported for all
+built-in router types. It defaults to “always escalate”, which leads to the
+application of the router’s parent’s supervision directive to all children of
+the router uniformly (i.e. not only the one which failed). It should be
+mentioned that the router overrides the default behavior of terminating all
+children upon restart, which means that a restart—while re-creating them—does
+not have an effect on the number of actors in the pool.
+
+Setting the strategy is easily done:
+
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java
+   :include: supervision
+
+Another potentially useful approach is to give the router the same strategy as
+its parent, which effectively treats all actors in the pool as if they were
+direct children of their grand-parent instead.
+
+.. note::
+
+  If the child of a router terminates, the router will not automatically spawn
+  a new child. In the event that all children of a router have terminated the
+  router will terminate itself.
+
 Router usage
 ^^^^^^^^^^^^
 
 In this section we will describe how to use the different router types.
 First we need to create some actors that will be used in the examples:
 
-.. includecode:: code/akka/docs/jrouting/PrintlnActor.java#printlnActor
+.. includecode:: code/docs/jrouting/PrintlnActor.java#printlnActor
 
 and
 
-.. includecode:: code/akka/docs/jrouting/FibonacciActor.java#fibonacciActor
+.. includecode:: code/docs/jrouting/FibonacciActor.java#fibonacciActor
 
 RoundRobinRouter
 ****************
 Routes in a `round-robin <http://en.wikipedia.org/wiki/Round-robin>`_ fashion to its routees.
 Code example:
 
-.. includecode:: code/akka/docs/jrouting/ParentActor.java#roundRobinRouter
+.. includecode:: code/docs/jrouting/ParentActor.java#roundRobinRouter
 
 When run you should see a similar output to this:
 
@@ -138,7 +180,7 @@ the message it receives to this routee.
 This procedure will happen each time it receives a message.
 Code example:
 
-.. includecode:: code/akka/docs/jrouting/ParentActor.java#randomRouter
+.. includecode:: code/docs/jrouting/ParentActor.java#randomRouter
 
 When run you should see a similar output to this:
 
@@ -171,14 +213,14 @@ The selection is done in this order:
 
 Code example:
 
-.. includecode:: code/akka/docs/jrouting/ParentActor.java#smallestMailboxRouter
+.. includecode:: code/docs/jrouting/ParentActor.java#smallestMailboxRouter
 
 BroadcastRouter
 ***************
 A broadcast router forwards the message it receives to *all* its routees.
 Code example:
 
-.. includecode:: code/akka/docs/jrouting/ParentActor.java#broadcastRouter
+.. includecode:: code/docs/jrouting/ParentActor.java#broadcastRouter
 
 When run you should see a similar output to this:
 
@@ -198,7 +240,7 @@ The ScatterGatherFirstCompletedRouter will send the message on to all its routee
 It then waits for first result it gets back. This result will be sent back to original sender.
 Code example:
 
-.. includecode:: code/akka/docs/jrouting/ParentActor.java#scatterGatherFirstCompletedRouter
+.. includecode:: code/docs/jrouting/ParentActor.java#scatterGatherFirstCompletedRouter
 
 When run you should see this:
 
@@ -230,16 +272,16 @@ of routees dynamically.
 
 This is an example of how to create a resizable router that is defined in configuration:
 
-.. includecode:: ../scala/code/akka/docs/routing/RouterViaConfigExample.scala#config-resize
+.. includecode:: ../scala/code/docs/routing/RouterViaConfigExample.scala#config-resize
 
-.. includecode:: code/akka/docs/jrouting/RouterViaConfigExample.java#configurableRoutingWithResizer
+.. includecode:: code/docs/jrouting/RouterViaConfigExample.java#configurableRoutingWithResizer
 
-Several more configuration options are availble and described in ``akka.actor.deployment.default.resizer``
+Several more configuration options are available and described in ``akka.actor.deployment.default.resizer``
 section of the reference :ref:`configuration`.
 
-This is an example of how to programatically create a resizable router:
+This is an example of how to programmatically create a resizable router:
 
-.. includecode:: code/akka/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingWithResizer
+.. includecode:: code/docs/jrouting/RouterViaProgramExample.java#programmaticRoutingWithResizer
 
 *It is also worth pointing out that if you define the ``router`` in the configuration file then this value
 will be used instead of any programmatically sent parameters.*
@@ -266,12 +308,12 @@ democrat related messages to the Democrat actor and all republican related messa
 
 We begin with defining the class:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#crRouter
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#crRouter
    :exclude: crRoute
 
 The next step is to implement the ``createCustomRoute`` method in the class just defined:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#crRoute
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#crRoute
 
 As you can see above we start off by creating the routees and put them in a collection.
 
@@ -280,27 +322,40 @@ It registers the routees internally and failing to call this method will
 cause a ``ActorInitializationException`` to be thrown when the router is used.
 Therefore always make sure to do the following in your custom router:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#crRegisterRoutees
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#crRegisterRoutees
 
 The routing logic is where your magic sauce is applied. In our example it inspects the message types
 and forwards to the correct routee based on this:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#crRoutingLogic
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#crRoutingLogic
 
 As you can see above what's returned in the ``CustomRoute`` function, which defines the mapping
 from incoming sender/message to a ``List`` of ``Destination(sender, routee)``.
 The sender is what "parent" the routee should see - changing this could be useful if you for example want
 another actor than the original sender to intermediate the result of the routee (if there is a result).
 For more information about how to alter the original sender we refer to the source code of
-`ScatterGatherFirstCompletedRouter <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Routing.scala#L375>`_
+`ScatterGatherFirstCompletedRouter <https://github.com/akka/akka/blob/master/akka-actor/src/main/scala/akka/routing/Routing.scala#L375>`_
 
 All in all the custom router looks like this:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#CustomRouter
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#CustomRouter
 
 If you are interested in how to use the VoteCountRouter it looks like this:
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#crTest
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#crTest
+
+.. caution::
+
+   When creating a cutom router the resulting RoutedActorRef optimizes the
+   sending of the message so that it does NOT go through the router’s mailbox
+   unless the route returns an empty recipient set.
+
+   This means that the ``route`` function defined in the ``RouterConfig``
+   or the function returned from ``CreateCustomRoute`` in
+   ``CustomRouterConfig`` is evaluated concurrently without protection by
+   the RoutedActorRef: either provide a reentrant (i.e. pure) implementation
+   or do the locking yourself!
+
 
 Configured Custom Router
 ************************
@@ -327,13 +382,47 @@ routing is not so important (i.e. no consistent hashing or round-robin is
 required); this enables newly created routees to pick up work immediately by
 stealing it from their siblings.
 
-The “head” router, of couse, cannot run on the same balancing dispatcher,
-because it does not process the same messages, hence this special actor does
+.. note::
+
+   If you provide a collection of actors to route to, then they will still use the same dispatcher
+   that was configured for them in their ``Props``, it is not possible to change an actors dispatcher
+   after it has been created.
+
+The “head” router cannot always run on the same dispatcher, because it
+does not process the same type of messages, hence this special actor does
 not use the dispatcher configured in :class:`Props`, but takes the
 ``routerDispatcher`` from the :class:`RouterConfig` instead, which defaults to
 the actor system’s default dispatcher. All standard routers allow setting this
 property in their constructor or factory method, custom routers have to
 implement the method in a suitable way.
 
-.. includecode:: code/akka/docs/jrouting/CustomRouterDocTestBase.java#dispatchers
+.. includecode:: code/docs/jrouting/CustomRouterDocTestBase.java#dispatchers
 
+.. note::
+
+   It is not allowed to configure the ``routerDispatcher`` to be a
+   :class:`BalancingDispatcher` since the messages meant for the special
+   router actor cannot be processed by any other actor.
+
+At first glance there seems to be an overlap between the
+:class:`BalancingDispatcher` and Routers, but they complement each other.
+The balancing dispatcher is in charge of running the actors while the routers
+are in charge of deciding which message goes where. A router can also have
+children that span multiple actor systems, even remote ones, but a dispatcher
+lives inside a single actor system.
+
+When using a :class:`RoundRobinRouter` with a :class:`BalancingDispatcher`
+there are some configuration settings to take into account.
+
+- There can only be ``nr-of-instances`` messages being processed at the same
+  time no matter how many threads are configured for the
+  :class:`BalancingDispatcher`.
+
+- Having ``throughput`` set to a low number makes no sense since you will only
+  be handing off to another actor that processes the same :class:`MailBox`
+  as yourself, which can be costly. Either the message just got into the
+  mailbox and you can receive it as well as anybody else, or everybody else
+  is busy and you are the only one available to receive the message.
+
+- Resizing the number of routees only introduce inertia, since resizing
+  is performed at specified intervals, but work stealing is instantaneous.

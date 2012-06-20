@@ -19,8 +19,10 @@ import akka.event.Logging.LogEventException
 import akka.event.Logging.Debug
 import java.util.concurrent.TimeUnit.NANOSECONDS
 import java.util.concurrent.{ ExecutionException, Callable, TimeoutException }
-import java.util.concurrent.atomic.{ AtomicInteger, AtomicReferenceFieldUpdater }
+import java.util.concurrent.atomic.{ AtomicInteger }
 import akka.pattern.AskTimeoutException
+import scala.util.DynamicVariable
+import scala.runtime.BoxedUnit
 
 object Await {
 
@@ -38,12 +40,14 @@ object Await {
      * Should throw [[java.util.concurrent.TimeoutException]] if times out
      * This method should not be called directly.
      */
+    @throws(classOf[TimeoutException])
     def ready(atMost: Duration)(implicit permit: CanAwait): this.type
 
     /**
      * Throws exceptions if cannot produce a T within the specified time
      * This method should not be called directly.
      */
+    @throws(classOf[Exception])
     def result(atMost: Duration)(implicit permit: CanAwait): T
   }
 
@@ -56,6 +60,7 @@ object Await {
    * @throws [[java.util.concurrent.TimeoutException]] if times out
    * @return The returned value as returned by Awaitable.ready
    */
+  @throws(classOf[TimeoutException])
   def ready[T <: Awaitable[_]](awaitable: T, atMost: Duration): T = awaitable.ready(atMost)
 
   /**
@@ -63,8 +68,10 @@ object Await {
    * WARNING: Blocking operation, use with caution.
    *
    * @throws [[java.util.concurrent.TimeoutException]] if times out
+   * @throws [[java.lang.Throwable]] (throws clause is Exception due to Java) if there was a problem
    * @return The returned value as returned by Awaitable.result
    */
+  @throws(classOf[Exception])
   def result[T](awaitable: Awaitable[T], atMost: Duration): T = awaitable.result(atMost)
 }
 
@@ -155,9 +162,9 @@ object Futures {
 
   /**
    * Signals that the current thread of execution will potentially engage
-   * in blocking calls after the call to this method, giving the system a
-   * chance to spawn new threads, reuse old threads or otherwise, to prevent
-   * starvation and/or unfairness.
+   * an action that will take a non-trivial amount of time, perhaps by using blocking.IO or using a lot of CPU time,
+   * giving the system a chance to spawn new threads, reuse old threads or otherwise,
+   * to prevent starvation and/or unfairness.
    *
    * Assures that any Future tasks initiated in the current thread will be
    * executed asynchronously, including any tasks currently queued to be
@@ -302,7 +309,11 @@ object Future {
   def flow[A](body: ⇒ A @cps[Future[Any]])(implicit executor: ExecutionContext): Future[A] = {
     val p = Promise[A]
     dispatchTask({ () ⇒
-      (reify(body) foreachFull (p success, p failure): Future[Any]) onFailure {
+      try {
+        (reify(body) foreachFull (p success, p failure): Future[Any]) onFailure {
+          case NonFatal(e) ⇒ p tryComplete Left(e)
+        }
+      } catch {
         case NonFatal(e) ⇒ p tryComplete Left(e)
       }
     }, true)
@@ -311,9 +322,9 @@ object Future {
 
   /**
    * Signals that the current thread of execution will potentially engage
-   * in blocking calls after the call to this method, giving the system a
-   * chance to spawn new threads, reuse old threads or otherwise, to prevent
-   * starvation and/or unfairness.
+   * an action that will take a non-trivial amount of time, perhaps by using blocking.IO or using a lot of CPU time,
+   * giving the system a chance to spawn new threads, reuse old threads or otherwise,
+   * to prevent starvation and/or unfairness.
    *
    * Assures that any Future tasks initiated in the current thread will be
    * executed asynchronously, including any tasks currently queued to be
@@ -341,7 +352,7 @@ object Future {
   def blocking(): Unit =
     _taskStack.get match {
       case stack if (stack ne null) && stack.nonEmpty ⇒
-        val executionContext = _executionContext.get match {
+        val executionContext = _executionContext.value match {
           case null ⇒ throw new IllegalStateException("'blocking' needs to be invoked inside a Future callback.")
           case some ⇒ some
         }
@@ -353,33 +364,33 @@ object Future {
     }
 
   private val _taskStack = new ThreadLocal[Stack[() ⇒ Unit]]()
-  private val _executionContext = new ThreadLocal[ExecutionContext]()
+  private val _executionContext = new DynamicVariable[ExecutionContext](null)
 
   /**
    * Internal API, do not call
    */
   private[akka] def dispatchTask(task: () ⇒ Unit, force: Boolean = false)(implicit executor: ExecutionContext): Unit =
     _taskStack.get match {
-      case stack if (stack ne null) && !force ⇒ stack push task
+      case stack if (stack ne null) && (executor eq _executionContext.value) && !force ⇒ stack push task
       case _ ⇒ executor.execute(
         new Runnable {
           def run =
             try {
-              _executionContext set executor
-              val taskStack = Stack.empty[() ⇒ Unit]
-              taskStack push task
-              _taskStack set taskStack
+              _executionContext.withValue(executor) {
+                val taskStack = Stack.empty[() ⇒ Unit]
+                taskStack push task
+                _taskStack set taskStack
 
-              while (taskStack.nonEmpty) {
-                val next = taskStack.pop()
-                try {
-                  next.apply()
-                } catch {
-                  case NonFatal(e) ⇒ executor.reportFailure(e)
+                while (taskStack.nonEmpty) {
+                  val next = taskStack.pop()
+                  try {
+                    next.apply()
+                  } catch {
+                    case NonFatal(e) ⇒ executor.reportFailure(e)
+                  }
                 }
               }
             } finally {
-              _executionContext.remove()
               _taskStack.remove()
             }
         })
@@ -387,6 +398,20 @@ object Future {
 
 }
 
+/**
+ *  Trait representing a value that may not have been computed yet.
+ *
+ *  @define asyncCallbackWarning
+ *
+ *    Note: the callback function may (and probably will) run in another thread,
+ *    and therefore should not refer to any unsynchronized state. In
+ *    particular, if using this method from an actor, do not access
+ *    the state of the actor from the callback function.
+ *    [[akka.dispatch.Promise]].`completeWith`,
+ *    [[akka.pattern.PipeToSupport.PipeableFuture]].`pipeTo`,
+ *    and [[akka.dispatch.Future]].`fallbackTo` are some methods to consider
+ *    using when possible, to avoid concurrent callbacks.
+ */
 sealed trait Future[+T] extends Await.Awaitable[T] {
 
   protected implicit def executor: ExecutionContext
@@ -439,6 +464,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    * immediately. Multiple
    * callbacks may be registered; there is no guarantee that they will be
    * executed in a particular order.
+   *
+   * $asyncCallbackWarning
    */
   def onComplete[U](func: Either[Throwable, T] ⇒ U): this.type
 
@@ -451,6 +478,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *     case Bar ⇒ target ! "bar"
    *   }
    * </pre>
+   *
+   * $asyncCallbackWarning
    */
   final def onSuccess[U](pf: PartialFunction[T, U]): this.type = onComplete {
     case Right(r) if pf isDefinedAt r ⇒ pf(r)
@@ -465,6 +494,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *     case NumberFormatException ⇒ target ! "wrong format"
    *   }
    * </pre>
+   *
+   * $asyncCallbackWarning
    */
   final def onFailure[U](pf: PartialFunction[Throwable, U]): this.type = onComplete {
     case Left(ex) if pf isDefinedAt ex ⇒ pf(ex)
@@ -508,6 +539,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    * Future(6 / 0) recover { case e: NotFoundException   ⇒ 0 } // result: exception
    * Future(6 / 2) recover { case e: ArithmeticException ⇒ 0 } // result: 3
    * </pre>
+   *
+   * $asyncCallbackWarning
    */
   final def recover[A >: T](pf: PartialFunction[Throwable, A]): Future[A] = {
     val p = Promise[A]()
@@ -531,6 +564,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *  val f = Future { Int.MaxValue }
    *  Future (6 / 0) recoverWith { case e: ArithmeticException => f } // result: Int.MaxValue
    *  }}}
+   *
+   * $asyncCallbackWarning
    */
   def recoverWith[U >: T](pf: PartialFunction[Throwable, Future[U]]): Future[U] = {
     val p = Promise[U]()
@@ -558,6 +593,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *    case Right(v) => dealWithSuccess(v)
    *  }
    *  }}}
+   *
+   * $asyncCallbackWarning
    */
   def andThen[U](pf: PartialFunction[Either[Throwable, T], U]): Future[T] = {
     val p = Promise[T]()
@@ -577,6 +614,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *   c: String <- actor ? 7       // returns "14"
    * } yield b + "-" + c
    * </pre>
+   *
+   * $asyncCallbackWarning
    */
   final def map[A](f: T ⇒ A): Future[A] = {
     val future = Promise[A]()
@@ -629,6 +668,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    *   c: String <- actor ? 7       // returns "14"
    * } yield b + "-" + c
    * </pre>
+   *
+   * $asyncCallbackWarning
    */
   final def flatMap[A](f: T ⇒ Future[A]): Future[A] = {
     val p = Promise[A]()
@@ -651,6 +692,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
 
   /**
    * Same as onSuccess { case r => f(r) } but is also used in for-comprehensions
+   *
+   * $asyncCallbackWarning
    */
   final def foreach[U](f: T ⇒ U): Unit = onComplete {
     case Right(r) ⇒ f(r)
@@ -659,6 +702,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
 
   /**
    * Used by for-comprehensions
+   *
+   * $asyncCallbackWarning
    */
   final def withFilter(p: T ⇒ Boolean) = new FutureWithFilter[T](this, p)
 
@@ -673,6 +718,8 @@ sealed trait Future[+T] extends Await.Awaitable[T] {
    * Returns a new Future that will hold the successful result of this Future if it matches
    * the given predicate, if it doesn't match, the resulting Future will be a failed Future
    * with a MatchError, of if this Future fails, that failure will be propagated to the returned Future
+   *
+   * $asyncCallbackWarning
    */
   final def filter(pred: T ⇒ Boolean): Future[T] = {
     val p = Promise[T]()
@@ -773,21 +820,6 @@ trait Promise[T] extends Future[T] {
     }
     fr
   }
-
-  final def <<(stream: PromiseStreamOut[T]): Future[T] @cps[Future[Any]] = shift { cont: (Future[T] ⇒ Future[Any]) ⇒
-    val fr = Promise[Any]()
-    val f = stream.dequeue(this)
-    f.onComplete { _ ⇒
-      try {
-        fr completeWith cont(f)
-      } catch {
-        case NonFatal(e) ⇒
-          executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
-          fr failure e
-      }
-    }
-    fr
-  }
 }
 
 //Companion object to FState, just to provide a cheap, immutable default entry
@@ -818,10 +850,12 @@ class DefaultPromise[T](implicit val executor: ExecutionContext) extends Abstrac
     awaitUnsafe(if (atMost.isFinite) atMost.toNanos else Long.MaxValue)
   }
 
+  @throws(classOf[TimeoutException])
   def ready(atMost: Duration)(implicit permit: CanAwait): this.type =
     if (isCompleted || tryAwait(atMost)) this
-    else throw new TimeoutException("Futures timed out after [" + atMost.toMillis + "] milliseconds")
+    else throw new TimeoutException("Futures timed out after [" + atMost + "]")
 
+  @throws(classOf[Exception])
   def result(atMost: Duration)(implicit permit: CanAwait): T =
     ready(atMost).value.get match {
       case Left(e: AskTimeoutException) ⇒ throw new AskTimeoutException(e.getMessage, e) // to get meaningful stack trace
@@ -838,15 +872,6 @@ class DefaultPromise[T](implicit val executor: ExecutionContext) extends Abstrac
     case _: Either[_, _] ⇒ true
     case _               ⇒ false
   }
-
-  @inline
-  private[this] final def updater = AbstractPromise.updater.asInstanceOf[AtomicReferenceFieldUpdater[AbstractPromise, AnyRef]]
-
-  @inline
-  protected final def updateState(oldState: AnyRef, newState: AnyRef): Boolean = updater.compareAndSet(this, oldState, newState)
-
-  @inline
-  protected final def getState: AnyRef = updater.get(this)
 
   def tryComplete(value: Either[Throwable, T]): Boolean = {
     val callbacks: List[Either[Throwable, T] ⇒ Unit] = {
@@ -922,9 +947,12 @@ final class KeptPromise[T](suppliedValue: Either[Throwable, T])(implicit val exe
  */
 object japi {
   @deprecated("Do not use this directly, use subclasses of this", "2.0")
-  class CallbackBridge[-T] extends PartialFunction[T, Unit] {
+  class CallbackBridge[-T] extends PartialFunction[T, BoxedUnit] {
     override final def isDefinedAt(t: T): Boolean = true
-    override final def apply(t: T): Unit = internal(t)
+    override final def apply(t: T): BoxedUnit = {
+      internal(t)
+      BoxedUnit.UNIT
+    }
     protected def internal(result: T): Unit = ()
   }
 
@@ -942,8 +970,11 @@ object japi {
   }
 
   @deprecated("Do not use this directly, use subclasses of this", "2.0")
-  class UnitFunctionBridge[-T] extends (T ⇒ Unit) {
-    override final def apply(t: T): Unit = internal(t)
+  class UnitFunctionBridge[-T] extends (T ⇒ BoxedUnit) {
+    override final def apply(t: T): BoxedUnit = {
+      internal(t)
+      BoxedUnit.UNIT
+    }
     protected def internal(result: T): Unit = ()
   }
 }
@@ -961,6 +992,7 @@ abstract class OnSuccess[-T] extends japi.CallbackBridge[T] {
    * This method will be invoked once when/if a Future that this callback is registered on
    * becomes successfully completed
    */
+  @throws(classOf[Throwable])
   def onSuccess(result: T): Unit
 }
 
@@ -977,6 +1009,7 @@ abstract class OnFailure extends japi.CallbackBridge[Throwable] {
    * This method will be invoked once when/if a Future that this callback is registered on
    * becomes completed with a failure
    */
+  @throws(classOf[Throwable])
   def onFailure(failure: Throwable): Unit
 }
 
@@ -997,6 +1030,7 @@ abstract class OnComplete[-T] extends japi.CallbackBridge[Either[Throwable, T]] 
    * becomes completed with a failure or a success.
    * In the case of success then "failure" will be null, and in the case of failure the "success" will be null.
    */
+  @throws(classOf[Throwable])
   def onComplete(failure: Throwable, success: T): Unit
 }
 
@@ -1024,22 +1058,32 @@ abstract class Recover[+T] extends japi.RecoverBridge[T] {
 }
 
 /**
+ * <i><b>Java API (not recommended):</b></i>
  * Callback for the Future.filter operation that creates a new Future which will
  * conditionally contain the success of another Future.
  *
- * SAM (Single Abstract Method) class
- * Java API
+ * Unfortunately it is not possible to express the type of a Scala filter in
+ * Java: Function1[T, Boolean], where “Boolean” is the primitive type. It is
+ * possible to use `Future.filter` by constructing such a function indirectly:
+ *
+ * {{{
+ * import static akka.dispatch.Filter.filterOf;
+ * Future<String> f = ...;
+ * f.filter(filterOf(new Function<String, Boolean>() {
+ *   @Override
+ *   public Boolean apply(String s) {
+ *     ...
+ *   }
+ * }));
+ * }}}
+ *
+ * However, `Future.filter` exists mainly to support Scala’s for-comprehensions,
+ * thus Java users should prefer `Future.map`, translating non-matching values
+ * to failure cases.
  */
-abstract class Filter[-T] extends japi.BooleanFunctionBridge[T] {
-  override final def internal(t: T): Boolean = filter(t)
-
-  /**
-   * This method will be invoked once when/if a Future that this callback is registered on
-   * becomes completed with a success.
-   *
-   * @return true if the successful value should be propagated to the new Future or not
-   */
-  def filter(result: T): Boolean
+object Filter {
+  def filterOf[T](f: akka.japi.Function[T, java.lang.Boolean]): (T ⇒ Boolean) =
+    new Function1[T, Boolean] { def apply(result: T): Boolean = f(result).booleanValue() }
 }
 
 /**
@@ -1057,6 +1101,7 @@ abstract class Foreach[-T] extends japi.UnitFunctionBridge[T] {
    * This method will be invoked once when/if a Future that this callback is registered on
    * becomes successfully completed
    */
+  @throws(classOf[Throwable])
   def each(result: T): Unit
 }
 
@@ -1065,8 +1110,25 @@ abstract class Foreach[-T] extends japi.UnitFunctionBridge[T] {
  * if the Future that this callback is registered on becomes completed with a success.
  * This callback is the equivalent of an akka.japi.Function
  *
+ * Override "apply" normally, or "checkedApply" if you need to throw checked exceptions.
+ *
  * SAM (Single Abstract Method) class
  *
  * Java API
  */
-abstract class Mapper[-T, +R] extends scala.runtime.AbstractFunction1[T, R]
+abstract class Mapper[-T, +R] extends scala.runtime.AbstractFunction1[T, R] {
+
+  /**
+   * Override this method to perform the map operation, by default delegates to "checkedApply"
+   * which by default throws an UnsupportedOperationException.
+   */
+  def apply(parameter: T): R = checkedApply(parameter)
+
+  /**
+   * Override this method if you need to throw checked exceptions
+   *
+   * @throws UnsupportedOperation by default
+   */
+  @throws(classOf[Throwable])
+  def checkedApply(parameter: T): R = throw new UnsupportedOperationException("Mapper.checkedApply has not been implemented")
+}

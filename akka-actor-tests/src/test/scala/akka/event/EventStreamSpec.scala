@@ -5,10 +5,11 @@ package akka.event
 
 import akka.testkit.AkkaSpec
 import akka.util.duration._
-import akka.actor.{ Actor, ActorRef, ActorSystemImpl }
+import akka.actor.{ Actor, ActorRef, ActorSystemImpl, ActorSystem, Props, UnhandledMessage }
 import com.typesafe.config.ConfigFactory
 import scala.collection.JavaConverters._
-import akka.actor.ActorSystem
+import akka.event.Logging.InitializeLogger
+import akka.pattern.gracefulStop
 
 object EventStreamSpec {
 
@@ -18,7 +19,15 @@ object EventStreamSpec {
         loglevel = INFO
         event-handlers = ["akka.event.EventStreamSpec$MyLog", "%s"]
       }
-      """.format(Logging.StandardOutLoggerName))
+      """.format(Logging.StandardOutLogger.getClass.getName))
+
+  val configUnhandled = ConfigFactory.parseString("""
+      akka {
+        stdout-loglevel = WARNING
+        loglevel = DEBUG
+        actor.debug.unhandled = on
+      }
+      """)
 
   case class M(i: Int)
 
@@ -27,9 +36,13 @@ object EventStreamSpec {
   class MyLog extends Actor {
     var dst: ActorRef = context.system.deadLetters
     def receive = {
-      case Logging.InitializeLogger(bus) ⇒ bus.subscribe(context.self, classOf[SetTarget]); sender ! Logging.LoggerInitialized
-      case SetTarget(ref)                ⇒ dst = ref; dst ! "OK"
-      case e: Logging.LogEvent           ⇒ dst ! e
+      case Logging.InitializeLogger(bus) ⇒
+        bus.subscribe(context.self, classOf[SetTarget])
+        bus.subscribe(context.self, classOf[UnhandledMessage])
+        sender ! Logging.LoggerInitialized
+      case SetTarget(ref)      ⇒ dst = ref; dst ! "OK"
+      case e: Logging.LogEvent ⇒ dst ! e
+      case u: UnhandledMessage ⇒ dst ! u
     }
   }
 
@@ -58,6 +71,30 @@ class EventStreamSpec extends AkkaSpec(EventStreamSpec.config) {
         bus.unsubscribe(testActor)
         bus.publish(M(13))
         expectNoMsg
+      }
+    }
+
+    "not allow null as subscriber" in {
+      val bus = new EventStream(true)
+      intercept[IllegalArgumentException] { bus.subscribe(null, classOf[M]) }.getMessage must be("subscriber is null")
+    }
+
+    "not allow null as unsubscriber" in {
+      val bus = new EventStream(true)
+      intercept[IllegalArgumentException] { bus.unsubscribe(null, classOf[M]) }.getMessage must be("subscriber is null")
+      intercept[IllegalArgumentException] { bus.unsubscribe(null) }.getMessage must be("subscriber is null")
+    }
+
+    "be able to log unhandled messages" in {
+      val sys = ActorSystem("EventStreamSpecUnhandled", configUnhandled)
+      try {
+        sys.eventStream.subscribe(testActor, classOf[AnyRef])
+        val m = UnhandledMessage(42, sys.deadLetters, sys.deadLetters)
+        sys.eventStream.publish(m)
+        expectMsgAllOf(m, Logging.Debug(sys.deadLetters.path.toString, sys.deadLetters.getClass, "unhandled message from " + sys.deadLetters + ": 42"))
+        sys.eventStream.unsubscribe(testActor)
+      } finally {
+        sys.shutdown()
       }
     }
 

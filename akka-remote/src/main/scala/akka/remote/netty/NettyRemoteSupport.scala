@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.remote.netty
@@ -12,47 +12,137 @@ import java.util.concurrent.Executors
 import scala.collection.mutable.HashMap
 import org.jboss.netty.channel.group.{ DefaultChannelGroup, ChannelGroupFuture }
 import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory
-import org.jboss.netty.channel.{ ChannelHandlerContext, Channel }
+import org.jboss.netty.channel.{ ChannelHandlerContext, Channel, DefaultChannelPipeline, ChannelHandler, ChannelPipelineFactory, ChannelLocal }
+import org.jboss.netty.handler.codec.frame.{ LengthFieldPrepender, LengthFieldBasedFrameDecoder }
 import org.jboss.netty.handler.codec.protobuf.{ ProtobufEncoder, ProtobufDecoder }
-import org.jboss.netty.handler.execution.OrderedMemoryAwareThreadPoolExecutor
+import org.jboss.netty.handler.execution.{ ExecutionHandler, OrderedMemoryAwareThreadPoolExecutor }
+import org.jboss.netty.handler.timeout.IdleStateHandler
 import org.jboss.netty.util.HashedWheelTimer
-import akka.actor.{ Address, ActorSystemImpl, ActorRef }
-import akka.dispatch.MonitorableThreadFactory
 import akka.event.Logging
 import akka.remote.RemoteProtocol.AkkaRemoteProtocol
-import akka.remote.{ RemoteTransportException, RemoteTransport, RemoteSettings, RemoteMarshallingOps, RemoteActorRefProvider, RemoteActorRef, RemoteServerStarted }
+import akka.remote.{ RemoteTransportException, RemoteTransport, RemoteActorRefProvider, RemoteActorRef, RemoteServerStarted }
 import akka.util.NonFatal
+import akka.actor.{ ExtendedActorSystem, Address, ActorRef }
+
+private[akka] object ChannelAddress extends ChannelLocal[Option[Address]] {
+  override def initialValue(ch: Channel): Option[Address] = None
+}
 
 /**
  * Provides the implementation of the Netty remote support
  */
-class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: ActorSystemImpl, val provider: RemoteActorRefProvider)
-  extends RemoteTransport with RemoteMarshallingOps {
+private[akka] class NettyRemoteTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends RemoteTransport(_system, _provider) {
+
+  import provider.remoteSettings
 
   val settings = new NettySettings(remoteSettings.config.getConfig("akka.remote.netty"), remoteSettings.systemName)
 
+  // TODO replace by system.scheduler
   val timer: HashedWheelTimer = new HashedWheelTimer(system.threadFactory)
 
-  val executor = new OrderedMemoryAwareThreadPoolExecutor(
-    settings.ExecutionPoolSize,
-    settings.MaxChannelMemorySize,
-    settings.MaxTotalMemorySize,
-    settings.ExecutionPoolKeepalive.length,
-    settings.ExecutionPoolKeepalive.unit,
-    system.threadFactory)
-
+  // TODO make configurable/shareable with server socket factory
   val clientChannelFactory = new NioClientSocketChannelFactory(
     Executors.newCachedThreadPool(system.threadFactory),
     Executors.newCachedThreadPool(system.threadFactory))
+
+  /**
+   * Backing scaffolding for the default implementation of NettyRemoteSupport.createPipeline.
+   */
+  object PipelineFactory {
+    /**
+     * Construct a DefaultChannelPipeline from a sequence of handlers; to be used
+     * in implementations of ChannelPipelineFactory.
+     */
+    def apply(handlers: Seq[ChannelHandler]): DefaultChannelPipeline =
+      (new DefaultChannelPipeline /: handlers) { (p, h) ⇒ p.addLast(Logging.simpleName(h.getClass), h); p }
+
+    /**
+     * Constructs the NettyRemoteTransport default pipeline with the give “head” handler, which
+     * is taken by-name to allow it not to be shared across pipelines.
+     *
+     * @param withTimeout determines whether an IdleStateHandler shall be included
+     */
+    def apply(endpoint: ⇒ Seq[ChannelHandler], withTimeout: Boolean, isClient: Boolean): ChannelPipelineFactory =
+      new ChannelPipelineFactory { override def getPipeline = apply(defaultStack(withTimeout, isClient) ++ endpoint) }
+
+    /**
+     * Construct a default protocol stack, excluding the “head” handler (i.e. the one which
+     * actually dispatches the received messages to the local target actors).
+     */
+    def defaultStack(withTimeout: Boolean, isClient: Boolean): Seq[ChannelHandler] =
+      (if (settings.EnableSSL) List(NettySSLSupport(settings, NettyRemoteTransport.this.log, isClient)) else Nil) :::
+        (if (withTimeout) List(timeout) else Nil) :::
+        msgFormat :::
+        authenticator :::
+        executionHandler
+
+    /**
+     * Construct an IdleStateHandler which uses [[akka.remote.netty.NettyRemoteTransport]].timer.
+     */
+    def timeout = new IdleStateHandler(timer,
+      settings.ReadTimeout.toSeconds.toInt,
+      settings.WriteTimeout.toSeconds.toInt,
+      settings.AllTimeout.toSeconds.toInt)
+
+    /**
+     * Construct frame&protobuf encoder/decoder.
+     */
+    def msgFormat = new LengthFieldBasedFrameDecoder(settings.MessageFrameSize, 0, 4, 0, 4) ::
+      new LengthFieldPrepender(4) ::
+      new RemoteMessageDecoder ::
+      new RemoteMessageEncoder(NettyRemoteTransport.this) ::
+      Nil
+
+    /**
+     * Construct an ExecutionHandler which is used to ensure that message dispatch does not
+     * happen on a netty thread (that could be bad if re-sending over the network for
+     * remote-deployed actors).
+     */
+    val executionHandler = if (settings.ExecutionPoolSize != 0)
+      List(new ExecutionHandler(new OrderedMemoryAwareThreadPoolExecutor(
+        settings.ExecutionPoolSize,
+        settings.MaxChannelMemorySize,
+        settings.MaxTotalMemorySize,
+        settings.ExecutionPoolKeepalive.length,
+        settings.ExecutionPoolKeepalive.unit,
+        system.threadFactory)))
+    else Nil
+
+    /**
+     * Construct and authentication handler which uses the SecureCookie to somewhat
+     * protect the TCP port from unauthorized use (don’t rely on it too much, though,
+     * as this is NOT a cryptographic feature).
+     */
+    def authenticator = if (settings.RequireCookie) List(new RemoteServerAuthenticationHandler(settings.SecureCookie)) else Nil
+  }
+
+  /**
+   * This method is factored out to provide an extension point in case the
+   * pipeline shall be changed. It is recommended to use
+   */
+  def createPipeline(endpoint: ⇒ ChannelHandler, withTimeout: Boolean, isClient: Boolean): ChannelPipelineFactory =
+    PipelineFactory(Seq(endpoint), withTimeout, isClient)
 
   private val remoteClients = new HashMap[Address, RemoteClient]
   private val clientsLock = new ReentrantReadWriteLock
 
   override protected def useUntrustedMode = remoteSettings.UntrustedMode
 
-  val server = try new NettyRemoteServer(this) catch {
-    case ex ⇒ shutdown(); throw ex
-  }
+  val server: NettyRemoteServer = try createServer() catch { case NonFatal(ex) ⇒ shutdown(); throw ex }
+
+  /**
+   * Override this method to inject a subclass of NettyRemoteServer instead of
+   * the normal one, e.g. for inserting security hooks. If this method throws
+   * an exception, the transport will shut itself down and re-throw.
+   */
+  protected def createServer(): NettyRemoteServer = new NettyRemoteServer(this)
+
+  /**
+   * Override this method to inject a subclass of RemoteClient instead of
+   * the normal one, e.g. for inserting security hooks. Get this transport’s
+   * address from `this.address`.
+   */
+  protected def createClient(recipient: Address): RemoteClient = new ActiveRemoteClient(this, recipient, address)
 
   // the address is set in start() or from the RemoteServerHandler, whichever comes first
   private val _address = new AtomicReference[Address]
@@ -66,7 +156,7 @@ class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: Actor
 
   def address = _address.get
 
-  val log = Logging(system.eventStream, "NettyRemoteTransport(" + address + ")")
+  lazy val log = Logging(system.eventStream, "NettyRemoteTransport(" + address + ")")
 
   def start(): Unit = {
     server.start()
@@ -91,17 +181,13 @@ class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: Actor
         try {
           timer.stop()
         } finally {
-          try {
-            clientChannelFactory.releaseExternalResources()
-          } finally {
-            executor.shutdown()
-          }
+          clientChannelFactory.releaseExternalResources()
         }
       }
     }
   }
 
-  protected[akka] def send(
+  def send(
     message: Any,
     senderOption: Option[ActorRef],
     recipient: RemoteActorRef): Unit = {
@@ -121,8 +207,7 @@ class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: Actor
                 //Recheck for addition, race between upgrades
                 case Some(client) ⇒ client //If already populated by other writer
                 case None ⇒ //Populate map
-                  val client = new ActiveRemoteClient(this, recipientAddress, address)
-                  client.connect()
+                  val client = createClient(recipientAddress)
                   remoteClients += recipientAddress -> client
                   client
               }
@@ -133,6 +218,7 @@ class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: Actor
             clientsLock.writeLock.unlock
           }
       }
+      client.connect() // this will literally do nothing after the first time
       client.send(message, senderOption, recipient)
     } finally {
       clientsLock.readLock.unlock
@@ -191,7 +277,7 @@ class NettyRemoteTransport(val remoteSettings: RemoteSettings, val system: Actor
 
 }
 
-class RemoteMessageEncoder(remoteSupport: NettyRemoteTransport) extends ProtobufEncoder {
+private[akka] class RemoteMessageEncoder(remoteSupport: NettyRemoteTransport) extends ProtobufEncoder {
   override def encode(ctx: ChannelHandlerContext, channel: Channel, msg: AnyRef): AnyRef = {
     msg match {
       case (message: Any, sender: Option[_], recipient: ActorRef) ⇒
@@ -206,9 +292,9 @@ class RemoteMessageEncoder(remoteSupport: NettyRemoteTransport) extends Protobuf
   }
 }
 
-class RemoteMessageDecoder extends ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance)
+private[akka] class RemoteMessageDecoder extends ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance)
 
-class DefaultDisposableChannelGroup(name: String) extends DefaultChannelGroup(name) {
+private[akka] class DefaultDisposableChannelGroup(name: String) extends DefaultChannelGroup(name) {
   protected val guard = new ReentrantReadWriteLock
   protected val open = new AtomicBoolean(true)
 

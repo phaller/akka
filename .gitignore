@@ -24,8 +24,7 @@ logs
 .#*
 .codefellow
 storage
-.codefellow
-.ensime
+.ensime*
 _dump
 .manager
 manifest.mf
@@ -51,8 +50,6 @@ multiverse.log
 .*.swp
 akka-docs/_build/
 *.pyc
-akka-tutorials/akka-tutorial-first/project/boot/
-akka-tutorials/akka-tutorial-first/project/plugins/project/
 akka-docs/exts/
 _akka_cluster/
 Makefile
@@ -63,3 +60,7 @@ akka.sublime-workspace
 _mb
 schoir.props
 worker*.log
+mongoDB/
+redis/
+beanstalk/
+.scalastyle

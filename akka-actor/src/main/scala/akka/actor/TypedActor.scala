@@ -6,19 +6,28 @@ package akka.actor
 
 import akka.japi.{ Creator, Option ⇒ JOption }
 import java.lang.reflect.{ InvocationTargetException, Method, InvocationHandler, Proxy }
-import akka.util.{ Timeout, NonFatal }
+import akka.util.{ Timeout, NonFatal, Duration }
 import java.util.concurrent.atomic.{ AtomicReference ⇒ AtomVar }
-import akka.serialization.{ Serialization, SerializationExtension }
 import akka.dispatch._
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit.MILLISECONDS
-import java.lang.IllegalStateException
-import akka.util.Duration
+import akka.actor.TypedActor.TypedActorInvocationHandler
+import akka.serialization.{ JavaSerializer, SerializationExtension }
+import java.io.ObjectStreamException
 
+/**
+ * A TypedActorFactory is something that can created TypedActor instances.
+ */
 trait TypedActorFactory {
 
+  /**
+   * Underlying dependency is to be able to create normal Actors
+   */
   protected def actorFactory: ActorRefFactory
 
+  /**
+   * Underlying dependency to a TypedActorExtension, which can either be contextual or ActorSystem "global"
+   */
   protected def typedActor: TypedActorExtension
 
   /**
@@ -50,7 +59,7 @@ trait TypedActorFactory {
   def getActorRefFor(proxy: AnyRef): ActorRef
 
   /**
-   * Creates a new TypedActor with the specified properies
+   * Creates a new TypedActor with the specified properties
    */
   def typedActorOf[R <: AnyRef, T <: R](props: TypedProps[T]): R = {
     val proxyVar = new AtomVar[R] //Chicken'n'egg-resolver
@@ -60,7 +69,7 @@ trait TypedActorFactory {
   }
 
   /**
-   * Creates a new TypedActor with the specified properies
+   * Creates a new TypedActor with the specified properties
    */
   def typedActorOf[R <: AnyRef, T <: R](props: TypedProps[T], name: String): R = {
     val proxyVar = new AtomVar[R] //Chicken'n'egg-resolver
@@ -78,6 +87,9 @@ trait TypedActorFactory {
 
 }
 
+/**
+ * This represents the TypedActor Akka Extension, access to the functionality is done through a given ActorSystem.
+ */
 object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvider {
   override def get(system: ActorSystem): TypedActorExtension = super.get(system)
 
@@ -124,15 +136,15 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
       }
     } catch { case i: InvocationTargetException ⇒ throw i.getTargetException }
 
-    private def writeReplace(): AnyRef = parameters match {
+    @throws(classOf[ObjectStreamException]) private def writeReplace(): AnyRef = parameters match {
       case null                 ⇒ SerializedMethodCall(method.getDeclaringClass, method.getName, method.getParameterTypes, null)
       case ps if ps.length == 0 ⇒ SerializedMethodCall(method.getDeclaringClass, method.getName, method.getParameterTypes, Array())
       case ps ⇒
+        val serialization = SerializationExtension(akka.serialization.JavaSerializer.currentSystem.value)
         val serializedParameters = Array.ofDim[(Int, Class[_], Array[Byte])](ps.length)
         for (i ← 0 until ps.length) {
           val p = ps(i)
-          val system = akka.serialization.JavaSerializer.currentSystem.value
-          val s = SerializationExtension(system).findSerializerFor(p)
+          val s = serialization.findSerializerFor(p)
           val m = if (s.includeManifest) p.getClass else null
           serializedParameters(i) = (s.identifier, m, s toBinary parameters(i)) //Mutable for the sake of sanity
         }
@@ -143,12 +155,14 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
 
   /**
    * Represents the serialized form of a MethodCall, uses readResolve and writeReplace to marshall the call
+   *
+   * INTERNAL USE ONLY
    */
-  case class SerializedMethodCall(ownerType: Class[_], methodName: String, parameterTypes: Array[Class[_]], serializedParameters: Array[(Int, Class[_], Array[Byte])]) {
+  private[akka] case class SerializedMethodCall(ownerType: Class[_], methodName: String, parameterTypes: Array[Class[_]], serializedParameters: Array[(Int, Class[_], Array[Byte])]) {
 
     //TODO implement writeObject and readObject to serialize
     //TODO Possible optimization is to special encode the parameter-types to conserve space
-    private def readResolve(): AnyRef = {
+    @throws(classOf[ObjectStreamException]) private def readResolve(): AnyRef = {
       val system = akka.serialization.JavaSerializer.currentSystem.value
       if (system eq null) throw new IllegalStateException(
         "Trying to deserialize a SerializedMethodCall without an ActorSystem in scope." +
@@ -211,6 +225,8 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
 
   /**
    * Implementation of TypedActor as an Actor
+   *
+   * INTERNAL USE ONLY
    */
   private[akka] class TypedActor[R <: AnyRef, T <: R](val proxyVar: AtomVar[R], createInstance: ⇒ T) extends Actor {
     val me = try {
@@ -227,15 +243,19 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
       case _             ⇒ super.supervisorStrategy
     }
 
-    override def preStart(): Unit = me match {
-      case l: PreStart ⇒ l.preStart()
-      case _           ⇒ super.preStart()
+    override def preStart(): Unit = withContext {
+      me match {
+        case l: PreStart ⇒ l.preStart()
+        case _           ⇒ super.preStart()
+      }
     }
 
     override def postStop(): Unit = try {
-      me match {
-        case l: PostStop ⇒ l.postStop()
-        case _           ⇒ super.postStop()
+      withContext {
+        me match {
+          case l: PostStop ⇒ l.postStop()
+          case _           ⇒ super.postStop()
+        }
       }
     } finally {
       TypedActor(context.system).invocationHandlerFor(proxyVar.get) match {
@@ -246,43 +266,54 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
       }
     }
 
-    override def preRestart(reason: Throwable, message: Option[Any]): Unit = me match {
-      case l: PreRestart ⇒ l.preRestart(reason, message)
-      case _             ⇒ super.preRestart(reason, message)
+    override def preRestart(reason: Throwable, message: Option[Any]): Unit = withContext {
+      me match {
+        case l: PreRestart ⇒ l.preRestart(reason, message)
+        case _             ⇒ super.preRestart(reason, message)
+      }
     }
 
-    override def postRestart(reason: Throwable): Unit = me match {
-      case l: PostRestart ⇒ l.postRestart(reason)
-      case _              ⇒ super.postRestart(reason)
+    override def postRestart(reason: Throwable): Unit = withContext {
+      me match {
+        case l: PostRestart ⇒ l.postRestart(reason)
+        case _              ⇒ super.postRestart(reason)
+      }
+    }
+
+    protected def withContext[T](unitOfWork: ⇒ T): T = {
+      TypedActor.selfReference set proxyVar.get
+      TypedActor.currentContext set context
+      try unitOfWork finally {
+        TypedActor.selfReference set null
+        TypedActor.currentContext set null
+      }
     }
 
     def receive = {
-      case m: MethodCall ⇒
-        TypedActor.selfReference set proxyVar.get
-        TypedActor.currentContext set context
-        try {
-          if (m.isOneWay) m(me)
-          else {
-            try {
-              if (m.returnsFuture_?) {
-                val s = sender
-                m(me).asInstanceOf[Future[Any]] onComplete {
-                  case Left(f)  ⇒ s ! Status.Failure(f)
-                  case Right(r) ⇒ s ! r
-                }
-              } else {
-                sender ! m(me)
+      case m: MethodCall ⇒ withContext {
+        if (m.isOneWay) m(me)
+        else {
+          try {
+            if (m.returnsFuture_?) {
+              val s = sender
+              m(me).asInstanceOf[Future[Any]] onComplete {
+                case Left(f)  ⇒ s ! Status.Failure(f)
+                case Right(r) ⇒ s ! r
               }
-            } catch {
-              case NonFatal(e) ⇒
-                sender ! Status.Failure(e)
-                throw e
+            } else {
+              sender ! m(me)
             }
+          } catch {
+            case NonFatal(e) ⇒
+              sender ! Status.Failure(e)
+              throw e
           }
-        } finally {
-          TypedActor.selfReference set null
-          TypedActor.currentContext set null
         }
+      }
+
+      case msg if me.isInstanceOf[Receiver] ⇒ withContext {
+        me.asInstanceOf[Receiver].onReceive(msg, sender)
+      }
     }
   }
 
@@ -295,6 +326,13 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
      * child actors.
      */
     def supervisorStrategy(): SupervisorStrategy
+  }
+
+  /**
+   * Mix this into your TypedActor to be able to intercept Terminated messages
+   */
+  trait Receiver {
+    def onReceive(message: Any, sender: ActorRef): Unit
   }
 
   /**
@@ -326,28 +364,32 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
    */
   trait PreRestart {
     /**
-     * User overridable callback.
+     * User overridable callback: '''By default it disposes of all children and then calls `postStop()`.'''
+     * @param reason the Throwable that caused the restart to happen
+     * @param message optionally the current message the actor processed when failing, if applicable
      * <p/>
      * Is called on a crashed Actor right BEFORE it is restarted to allow clean
      * up of resources before Actor is terminated.
-     * By default it calls postStop()
+     * By default it terminates all children and calls postStop()
      */
     def preRestart(reason: Throwable, message: Option[Any]): Unit
   }
 
   trait PostRestart {
     /**
-     * User overridable callback.
+     * User overridable callback: By default it calls `preStart()`.
+     * @param reason the Throwable that caused the restart to happen
      * <p/>
      * Is called right AFTER restart on the newly created Actor to allow reinitialization after an Actor crash.
-     * By default it calls preStart()
      */
     def postRestart(reason: Throwable): Unit
   }
 
-  private[akka] class TypedActorInvocationHandler(val extension: TypedActorExtension, val actorVar: AtomVar[ActorRef], val timeout: Timeout) extends InvocationHandler {
+  /**
+   * INTERNAL USE ONLY
+   */
+  private[akka] class TypedActorInvocationHandler(@transient val extension: TypedActorExtension, @transient val actorVar: AtomVar[ActorRef], @transient val timeout: Timeout) extends InvocationHandler with Serializable {
     def actor = actorVar.get
-
     @throws(classOf[Throwable])
     def invoke(proxy: AnyRef, method: Method, args: Array[AnyRef]): AnyRef = method.getName match {
       case "toString" ⇒ actor.toString
@@ -368,6 +410,20 @@ object TypedActor extends ExtensionId[TypedActorExtension] with ExtensionIdProvi
           case m ⇒ Await.result(ask(actor, m)(timeout), timeout.duration).asInstanceOf[AnyRef]
         }
     }
+    @throws(classOf[ObjectStreamException]) private def writeReplace(): AnyRef = SerializedTypedActorInvocationHandler(actor, timeout.duration)
+  }
+
+  /**
+   * INTERNAL USE ONLY
+   */
+  private[akka] case class SerializedTypedActorInvocationHandler(val actor: ActorRef, val timeout: Duration) {
+    @throws(classOf[ObjectStreamException]) private def readResolve(): AnyRef = JavaSerializer.currentSystem.value match {
+      case null ⇒ throw new IllegalStateException("SerializedTypedActorInvocationHandler.readResolve requires that JavaSerializer.currentSystem.value is set to a non-null value")
+      case some ⇒ toTypedActorInvocationHandler(some)
+    }
+
+    def toTypedActorInvocationHandler(system: ActorSystem): TypedActorInvocationHandler =
+      new TypedActorInvocationHandler(TypedActor(system), new AtomVar[ActorRef](actor), new Timeout(timeout))
   }
 }
 
@@ -382,7 +438,7 @@ object TypedProps {
   val defaultLoader: Option[ClassLoader] = None
 
   /**
-   * @return a sequence of interfaces that the speicified class implements,
+   * @return a sequence of interfaces that the specified class implements,
    * or a sequence containing only itself, if itself is an interface.
    */
   def extractInterfaces(clazz: Class[_]): Seq[Class[_]] =
@@ -533,12 +589,16 @@ case class TypedProps[T <: AnyRef] protected[TypedProps] (
   def withoutInterface(interface: Class[_ >: T]): TypedProps[T] =
     this.copy(interfaces = interfaces diff TypedProps.extractInterfaces(interface))
 
-  import akka.actor.{ Props ⇒ ActorProps }
-  def actorProps(): ActorProps =
-    if (dispatcher == ActorProps().dispatcher) ActorProps()
-    else ActorProps(dispatcher = dispatcher)
+  /**
+   * Returns the akka.actor.Props representation of this TypedProps
+   */
+  def actorProps(): Props = if (dispatcher == Props().dispatcher) Props() else Props(dispatcher = dispatcher)
 }
 
+/**
+ * ContextualTypedActorFactory allows TypedActors to create children, effectively forming the same Actor Supervision Hierarchies
+ * as normal Actors can.
+ */
 case class ContextualTypedActorFactory(typedActor: TypedActorExtension, actorFactory: ActorContext) extends TypedActorFactory {
   override def getActorRefFor(proxy: AnyRef): ActorRef = typedActor.getActorRefFor(proxy)
   override def isTypedActor(proxyOrNot: AnyRef): Boolean = typedActor.isTypedActor(proxyOrNot)
@@ -571,7 +631,9 @@ class TypedActorExtension(system: ExtendedActorSystem) extends TypedActorFactory
   def isTypedActor(proxyOrNot: AnyRef): Boolean = invocationHandlerFor(proxyOrNot) ne null
 
   // Private API
-
+  /**
+   * INTERNAL USE ONLY
+   */
   private[akka] def createActorRefProxy[R <: AnyRef, T <: R](props: TypedProps[T], proxyVar: AtomVar[R], actorRef: ⇒ ActorRef): R = {
     //Warning, do not change order of the following statements, it's some elaborate chicken-n-egg handling
     val actorVar = new AtomVar[ActorRef](null)
@@ -595,6 +657,9 @@ class TypedActorExtension(system: ExtendedActorSystem) extends TypedActorFactory
     }
   }
 
+  /**
+   * INTERNAL USE ONLY
+   */
   private[akka] def invocationHandlerFor(typedActor_? : AnyRef): TypedActorInvocationHandler =
     if ((typedActor_? ne null) && Proxy.isProxyClass(typedActor_?.getClass)) typedActor_? match {
       case null ⇒ null

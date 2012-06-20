@@ -3,10 +3,14 @@
  */
 package akka.pattern
 
+import akka.actor.Scheduler
+import akka.dispatch.ExecutionContext
+import java.util.concurrent.Callable
+
 object Patterns {
   import akka.actor.{ ActorRef, ActorSystem }
   import akka.dispatch.Future
-  import akka.pattern.{ ask ⇒ scalaAsk, pipe ⇒ scalaPipe }
+  import akka.pattern.{ ask ⇒ scalaAsk, pipe ⇒ scalaPipe, gracefulStop ⇒ scalaGracefulStop, after ⇒ scalaAfter }
   import akka.util.{ Timeout, Duration }
 
   /**
@@ -14,7 +18,7 @@ object Patterns {
    * Sends a message asynchronously and returns a [[akka.dispatch.Future]]
    * holding the eventual reply message; this means that the target actor
    * needs to send the result to the `sender` reference provided. The Future
-   * will be completed with an [[akka.actor.AskTimeoutException]] after the
+   * will be completed with an [[akka.pattern.AskTimeoutException]] after the
    * given timeout has expired; this is independent from any timeout applied
    * while awaiting a result for this future (i.e. in
    * `Await.result(..., timeout)`).
@@ -45,7 +49,7 @@ object Patterns {
    * Sends a message asynchronously and returns a [[akka.dispatch.Future]]
    * holding the eventual reply message; this means that the target actor
    * needs to send the result to the `sender` reference provided. The Future
-   * will be completed with an [[akka.actor.AskTimeoutException]] after the
+   * will be completed with an [[akka.pattern.AskTimeoutException]] after the
    * given timeout has expired; this is independent from any timeout applied
    * while awaiting a result for this future (i.e. in
    * `Await.result(..., timeout)`).
@@ -96,8 +100,22 @@ object Patterns {
    * Useful when you need to wait for termination or compose ordered termination of several actors.
    *
    * If the target actor isn't terminated within the timeout the [[akka.dispatch.Future]]
-   * is completed with failure [[akka.actor.ActorTimeoutException]].
+   * is completed with failure [[akka.pattern.AskTimeoutException]].
    */
   def gracefulStop(target: ActorRef, timeout: Duration, system: ActorSystem): Future[java.lang.Boolean] =
-    akka.pattern.gracefulStop(target, timeout)(system).asInstanceOf[Future[java.lang.Boolean]]
+    scalaGracefulStop(target, timeout)(system).asInstanceOf[Future[java.lang.Boolean]]
+
+  /**
+   * Returns a [[akka.dispatch.Future]] that will be completed with the success or failure of the provided Callable
+   * after the specified duration.
+   */
+  def after[T](duration: Duration, scheduler: Scheduler, context: ExecutionContext, value: Callable[Future[T]]): Future[T] =
+    scalaAfter(duration, scheduler)(value.call())(context)
+
+  /**
+   * Returns a [[akka.dispatch.Future]] that will be completed with the success or failure of the provided value
+   * after the specified duration.
+   */
+  def after[T](duration: Duration, scheduler: Scheduler, context: ExecutionContext, value: Future[T]): Future[T] =
+    scalaAfter(duration, scheduler)(value)(context)
 }

@@ -10,10 +10,8 @@ import akka.actor._
  * An Iterable that also contains a version.
  */
 trait VersionedIterable[A] {
-  val version: Long
-
+  def version: Long
   def iterable: Iterable[A]
-
   def apply(): Iterable[A] = iterable
 }
 
@@ -42,10 +40,10 @@ trait ConnectionManager {
   /**
    * Shuts the connection manager down, which stops all managed actors
    */
-  def shutdown()
+  def shutdown(): Unit
 
   /**
-   * Returns a VersionedIterator containing all connectected ActorRefs at some moment in time. Since there is
+   * Returns a VersionedIterator containing all connected ActorRefs at some moment in time. Since there is
    * the time element, also the version is included to be able to read the data (the connections) and the version
    * in an atomic manner.
    *
@@ -59,5 +57,5 @@ trait ConnectionManager {
    *
    * @param ref the dead
    */
-  def remove(deadRef: ActorRef)
+  def remove(deadRef: ActorRef): Unit
 }

@@ -15,16 +15,23 @@ You can schedule sending of messages to actors and execution of tasks (functions
 You will get a ``Cancellable`` back that you can call :meth:`cancel` on to cancel the execution of the
 scheduled operation.
 
+.. warning::
+
+    The default implementation of ``Scheduler`` used by Akka is based on the Netty ``HashedWheelTimer``.
+    It does not execute tasks at the exact time, but on every tick, it will run everything that is overdue.
+    The accuracy of the default Scheduler can be modified by the "ticks-per-wheel" and "tick-duration" configuration
+    properties. For more information, see: `HashedWheelTimers <http://www.cse.wustl.edu/~cdgill/courses/cs6874/TimingWheels.ppt>`_.
+
 Some examples
 -------------
 
-.. includecode:: code/akka/docs/actor/SchedulerDocTestBase.java
+.. includecode:: code/docs/actor/SchedulerDocTestBase.java
    :include: imports1,schedule-one-off-message
 
-.. includecode:: code/akka/docs/actor/SchedulerDocTestBase.java
+.. includecode:: code/docs/actor/SchedulerDocTestBase.java
    :include: schedule-one-off-thunk
 
-.. includecode:: code/akka/docs/actor/SchedulerDocTestBase.java
+.. includecode:: code/docs/actor/SchedulerDocTestBase.java
    :include: imports1,imports2,schedule-recurring
 
 From ``akka.actor.ActorSystem``

@@ -12,7 +12,6 @@ Java API
    event-bus
    scheduler
    futures
-   dataflow
    fault-tolerance
    dispatchers
    routing
@@ -24,3 +23,6 @@ Java API
    fsm
    extending-akka
    zeromq
+   microkernel
+   testing
+   howto

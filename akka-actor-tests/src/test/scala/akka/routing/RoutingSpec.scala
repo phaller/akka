@@ -10,7 +10,7 @@ import akka.testkit._
 import akka.util.duration._
 import akka.dispatch.Await
 import akka.util.Duration
-import akka.config.ConfigurationException
+import akka.ConfigurationException
 import com.typesafe.config.ConfigFactory
 import akka.pattern.ask
 import java.util.concurrent.ConcurrentHashMap
@@ -53,6 +53,7 @@ object RoutingSpec {
       }
     }
     def routerDispatcher: String = Dispatchers.DefaultDispatcherId
+    def supervisorStrategy: SupervisorStrategy = SupervisorStrategy.defaultStrategy
   }
 
 }
@@ -72,7 +73,9 @@ class RoutingSpec extends AkkaSpec(RoutingSpec.config) with DefaultTimeout with 
       watch(router)
       watch(c2)
       system.stop(c2)
-      expectMsg(Terminated(c2))
+      expectMsgPF() {
+        case t @ Terminated(`c2`) if t.existenceConfirmed == true ⇒ t
+      }
       // it might take a while until the Router has actually processed the Terminated message
       awaitCond {
         router ! ""
@@ -83,7 +86,9 @@ class RoutingSpec extends AkkaSpec(RoutingSpec.config) with DefaultTimeout with 
         res == Seq(c1, c1)
       }
       system.stop(c1)
-      expectMsg(Terminated(router))
+      expectMsgPF() {
+        case t @ Terminated(`router`) if t.existenceConfirmed == true ⇒ t
+      }
     }
 
     "be able to send their routees" in {
@@ -117,13 +122,53 @@ class RoutingSpec extends AkkaSpec(RoutingSpec.config) with DefaultTimeout with 
     "use configured nr-of-instances when FromConfig" in {
       val router = system.actorOf(Props[TestActor].withRouter(FromConfig), "router1")
       Await.result(router ? CurrentRoutees, 5 seconds).asInstanceOf[RouterRoutees].routees.size must be(3)
+      watch(router)
       system.stop(router)
+      expectMsgType[Terminated]
     }
 
     "use configured nr-of-instances when router is specified" in {
       val router = system.actorOf(Props[TestActor].withRouter(RoundRobinRouter(nrOfInstances = 2)), "router1")
       Await.result(router ? CurrentRoutees, 5 seconds).asInstanceOf[RouterRoutees].routees.size must be(3)
       system.stop(router)
+    }
+
+    "set supplied supervisorStrategy" in {
+      //#supervision
+      val escalator = OneForOneStrategy() {
+        //#custom-strategy
+        case e ⇒ testActor ! e; SupervisorStrategy.Escalate
+        //#custom-strategy
+      }
+      val router = system.actorOf(Props.empty.withRouter(
+        RoundRobinRouter(1, supervisorStrategy = escalator)))
+      //#supervision
+      router ! CurrentRoutees
+      EventFilter[ActorKilledException](occurrences = 2) intercept {
+        expectMsgType[RouterRoutees].routees.head ! Kill
+      }
+      expectMsgType[ActorKilledException]
+    }
+
+    "default to all-for-one-always-escalate strategy" in {
+      val restarter = OneForOneStrategy() {
+        case e ⇒ testActor ! e; SupervisorStrategy.Restart
+      }
+      val supervisor = system.actorOf(Props(new Supervisor(restarter)))
+      supervisor ! Props(new Actor {
+        def receive = {
+          case x: String ⇒ throw new Exception(x)
+        }
+        override def postRestart(reason: Throwable): Unit = testActor ! "restarted"
+      }).withRouter(RoundRobinRouter(3))
+      val router = expectMsgType[ActorRef]
+      EventFilter[Exception]("die", occurrences = 2) intercept {
+        router ! "die"
+      }
+      expectMsgType[Exception].getMessage must be("die")
+      expectMsg("restarted")
+      expectMsg("restarted")
+      expectMsg("restarted")
     }
 
   }
@@ -542,6 +587,7 @@ class RoutingSpec extends AkkaSpec(RoutingSpec.config) with DefaultTimeout with 
     case class VoteCountRouter() extends RouterConfig {
 
       def routerDispatcher: String = Dispatchers.DefaultDispatcherId
+      def supervisorStrategy: SupervisorStrategy = SupervisorStrategy.defaultStrategy
 
       //#crRoute
       def createRoute(routeeProps: Props, routeeProvider: RouteeProvider): Route = {

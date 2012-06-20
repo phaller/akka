@@ -4,10 +4,12 @@
 package akka.testkit
 
 import scala.util.matching.Regex
-import akka.actor.{ DeadLetter, ActorSystem, Terminated }
+import akka.actor.{ DeadLetter, ActorSystem, Terminated, UnhandledMessage }
 import akka.dispatch.{ SystemMessage, Terminate }
 import akka.event.Logging.{ Warning, LogEvent, InitializeLogger, Info, Error, Debug, LoggerInitialized }
 import akka.event.Logging
+import java.lang.{ Iterable ⇒ JIterable }
+import scala.collection.JavaConverters
 import akka.util.Duration
 
 /**
@@ -34,11 +36,21 @@ object TestEvent {
   object Mute {
     def apply(filter: EventFilter, filters: EventFilter*): Mute = new Mute(filter +: filters.toSeq)
   }
-  case class Mute(filters: Seq[EventFilter]) extends TestEvent
+  case class Mute(filters: Seq[EventFilter]) extends TestEvent {
+    /**
+     * Java API
+     */
+    def this(filters: JIterable[EventFilter]) = this(JavaConverters.iterableAsScalaIterableConverter(filters).asScala.toSeq)
+  }
   object UnMute {
     def apply(filter: EventFilter, filters: EventFilter*): UnMute = new UnMute(filter +: filters.toSeq)
   }
-  case class UnMute(filters: Seq[EventFilter]) extends TestEvent
+  case class UnMute(filters: Seq[EventFilter]) extends TestEvent {
+    /**
+     * Java API
+     */
+    def this(filters: JIterable[EventFilter]) = this(JavaConverters.iterableAsScalaIterableConverter(filters).asScala.toSeq)
+  }
 }
 
 /**
@@ -447,7 +459,7 @@ class TestEventListener extends Logging.DefaultLogger {
 
   override def receive = {
     case InitializeLogger(bus) ⇒
-      Seq(classOf[Mute], classOf[UnMute], classOf[DeadLetter]) foreach (bus.subscribe(context.self, _))
+      Seq(classOf[Mute], classOf[UnMute], classOf[DeadLetter], classOf[UnhandledMessage]) foreach (bus.subscribe(context.self, _))
       sender ! LoggerInitialized
     case Mute(filters)   ⇒ filters foreach addFilter
     case UnMute(filters) ⇒ filters foreach removeFilter
@@ -462,6 +474,9 @@ class TestEventListener extends Logging.DefaultLogger {
         val event = Warning(rcp.path.toString, rcp.getClass, "received dead letter from " + snd + ": " + msg)
         if (!filter(event)) print(event)
       }
+    case UnhandledMessage(msg, sender, rcp) ⇒
+      val event = Warning(rcp.path.toString, rcp.getClass, "unhandled message from " + sender + ": " + msg)
+      if (!filter(event)) print(event)
     case m ⇒ print(Debug(context.system.name, this.getClass, m))
   }
 

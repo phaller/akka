@@ -5,14 +5,13 @@ package akka.testkit
 
 import org.scalatest.{ WordSpec, BeforeAndAfterAll, Tag }
 import org.scalatest.matchers.MustMatchers
-import akka.actor.{ ActorSystem, ActorSystemImpl }
+import akka.actor.ActorSystem
 import akka.actor.{ Actor, ActorRef, Props }
 import akka.event.{ Logging, LoggingAdapter }
 import akka.util.duration._
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import akka.actor.PoisonPill
-import akka.actor.CreateChild
 import akka.actor.DeadLetter
 import java.util.concurrent.TimeoutException
 import akka.dispatch.{ Await, MessageDispatcher }
@@ -20,6 +19,7 @@ import akka.dispatch.Dispatchers
 import akka.pattern.ask
 
 object TimingTest extends Tag("timing")
+object LongRunningTest extends Tag("long-running")
 
 object AkkaSpec {
   val testConf: Config = ConfigFactory.parseString("""
@@ -45,9 +45,13 @@ object AkkaSpec {
     ConfigFactory.parseMap(map.asJava)
   }
 
-  def getCallerName: String = {
+  def getCallerName(clazz: Class[_]): String = {
     val s = Thread.currentThread.getStackTrace map (_.getClassName) drop 1 dropWhile (_ matches ".*AkkaSpec.?$")
-    s.head.replaceFirst(""".*\.""", "").replaceAll("[^a-zA-Z_0-9]", "_")
+    val reduced = s.lastIndexWhere(_ == clazz.getName) match {
+      case -1 ⇒ s
+      case z  ⇒ s drop (z + 1)
+    }
+    reduced.head.replaceFirst(""".*\.""", "").replaceAll("[^a-zA-Z_0-9]", "_")
   }
 
 }
@@ -55,13 +59,13 @@ object AkkaSpec {
 abstract class AkkaSpec(_system: ActorSystem)
   extends TestKit(_system) with WordSpec with MustMatchers with BeforeAndAfterAll {
 
-  def this(config: Config) = this(ActorSystem(AkkaSpec.getCallerName, config.withFallback(AkkaSpec.testConf)))
+  def this(config: Config) = this(ActorSystem(AkkaSpec.getCallerName(getClass), config.withFallback(AkkaSpec.testConf)))
 
   def this(s: String) = this(ConfigFactory.parseString(s))
 
   def this(configMap: Map[String, _]) = this(AkkaSpec.mapToConfig(configMap))
 
-  def this() = this(ActorSystem(AkkaSpec.getCallerName, AkkaSpec.testConf))
+  def this() = this(ActorSystem(AkkaSpec.getCallerName(getClass), AkkaSpec.testConf))
 
   val log: LoggingAdapter = Logging(system, this.getClass)
 
@@ -71,7 +75,7 @@ abstract class AkkaSpec(_system: ActorSystem)
 
   final override def afterAll {
     system.shutdown()
-    try Await.ready(system.asInstanceOf[ActorSystemImpl].terminationFuture, 5 seconds) catch {
+    try system.awaitTermination(5 seconds) catch {
       case _: TimeoutException ⇒ system.log.warning("Failed to stop [{}] within 5 seconds", system.name)
     }
     atTermination()
@@ -91,6 +95,18 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
 
   "An AkkaSpec" must {
 
+    "warn about unhandled messages" in {
+      implicit val system = ActorSystem("AkkaSpec0", AkkaSpec.testConf)
+      try {
+        val a = system.actorOf(Props.empty)
+        EventFilter.warning(start = "unhandled message", occurrences = 1) intercept {
+          a ! 42
+        }
+      } finally {
+        system.shutdown()
+      }
+    }
+
     "terminate all actors" in {
       // verbose config just for demonstration purposes, please leave in in case of debugging
       import scala.collection.JavaConverters._
@@ -98,9 +114,7 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
         "akka.actor.debug.lifecycle" -> true, "akka.actor.debug.event-stream" -> true,
         "akka.loglevel" -> "DEBUG", "akka.stdout-loglevel" -> "DEBUG")
       val system = ActorSystem("AkkaSpec1", ConfigFactory.parseMap(conf.asJava).withFallback(AkkaSpec.testConf))
-      val spec = new AkkaSpec(system) {
-        val ref = Seq(testActor, system.actorOf(Props.empty, "name"))
-      }
+      val spec = new AkkaSpec(system) { val ref = Seq(testActor, system.actorOf(Props.empty, "name")) }
       spec.ref foreach (_.isTerminated must not be true)
       system.shutdown()
       spec.awaitCond(spec.ref forall (_.isTerminated), 2 seconds)

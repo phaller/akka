@@ -5,9 +5,6 @@
  ZeroMQ (Java)
 ###############
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
 
 Akka provides a ZeroMQ module which abstracts a ZeroMQ connection and therefore allows interaction between Akka actors to take place over ZeroMQ connections. The messages can be of a proprietary format or they can be defined using Protobuf. The socket actor is fault-tolerant by default and when you use the newSocket method to create new sockets it will properly reinitialize the socket.
 
@@ -22,19 +19,19 @@ Connection
 ZeroMQ supports multiple connectivity patterns, each aimed to meet a different set of requirements. Currently, this module supports publisher-subscriber connections and connections based on dealers and routers. For connecting or accepting connections, a socket must be created.
 Sockets are always created using the ``akka.zeromq.ZeroMQExtension``, for example:
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#pub-socket
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#pub-socket
 
 Above examples will create a ZeroMQ Publisher socket that is Bound to the port 1233 on localhost.
 
 Similarly you can create a subscription socket, with a listener, that subscribes to all messages from the publisher using:
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#sub-socket
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#sub-socket
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#listener-actor
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#listener-actor
 
 The following sub-sections describe the supported connection patterns and how they can be used in an Akka environment. However, for a comprehensive discussion of connection patterns, please refer to `ZeroMQ -- The Guide <http://zguide.zeromq.org/page:all>`_.
 
-Publisher-subscriber connection
+Publisher-Subscriber Connection
 -------------------------------
 
 In a publisher-subscriber (pub-sub) connection, the publisher accepts one or more subscribers. Each subscriber shall
@@ -46,18 +43,18 @@ When you're using zeromq pub/sub you should be aware that it needs multicast - c
 
 An actor is subscribed to a topic as follows:
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#sub-topic-socket
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#sub-topic-socket
 
 It is a prefix match so it is subscribed to all topics starting with ``foo.bar``. Note that if the given string is empty or
 ``Subscribe.all()`` is used, the actor is subscribed to all topics.
 
 To unsubscribe from a topic you do the following:
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#unsub-topic-socket
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#unsub-topic-socket
 
 To publish messages to a topic you must use two Frames with the topic in the first frame.
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#pub-topic
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#pub-topic
 
 Pub-Sub in Action
 ^^^^^^^^^^^^^^^^^
@@ -67,24 +64,24 @@ The following example illustrates one publisher with two subscribers.
 The publisher monitors current heap usage and system load and periodically publishes ``Heap`` events on the ``"health.heap"`` topic
 and ``Load`` events on the ``"health.load"`` topic.
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#health
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#health
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#health2
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#health2
 
 Let's add one subscriber that logs the information. It subscribes to all topics starting with ``"health"``, i.e. both ``Heap`` and
 ``Load`` events.
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#logger
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#logger
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#logger2
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#logger2
 
 Another subscriber keep track of used heap and warns if too much heap is used. It only subscribes to ``Heap`` events.
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#alerter
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#alerter
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#alerter2
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#alerter2
 
-Router-Dealer connection
+Router-Dealer Connection
 ------------------------
 
 While Pub/Sub is nice the real advantage of zeromq is that it is a "lego-box" for reliable messaging. And because there are so many integrations the multi-language support is fantastic.
@@ -93,6 +90,37 @@ With those socket types you can build your own reliable pub sub broker that uses
 
 To create a Router socket that has a high watermark configured, you would do:
 
-.. includecode:: code/akka/docs/zeromq/ZeromqDocTestBase.java#high-watermark
+.. includecode:: code/docs/zeromq/ZeromqDocTestBase.java#high-watermark
 
 The akka-zeromq module accepts most if not all the available configuration options for a zeromq socket.
+
+Push-Pull Connection
+--------------------
+
+Akka ZeroMQ module supports ``Push-Pull`` connections.
+
+You can create a ``Push`` connection through the::
+
+    ActorRef newPushSocket(SocketOption[] socketParameters);
+
+You can create a ``Pull`` connection through the::
+
+    ActorRef newPullSocket(SocketOption[] socketParameters);
+
+More documentation and examples will follow soon.
+
+Rep-Req Connection
+------------------
+
+Akka ZeroMQ module supports ``Rep-Req`` connections.
+
+You can create a ``Rep`` connection through the::
+
+    ActorRef newRepSocket(SocketOption[] socketParameters);
+
+You can create a ``Req`` connection through the::
+
+    ActorRef newReqSocket(SocketOption[] socketParameters);
+
+More documentation and examples will follow soon.
+

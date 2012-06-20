@@ -40,6 +40,39 @@ class TestProbeSpec extends AkkaSpec with DefaultTimeout {
       probe1.expectMsg(0 millis, "world")
     }
 
+    "have an AutoPilot" in {
+      //#autopilot
+      val probe = TestProbe()
+      probe.setAutoPilot(new TestActor.AutoPilot {
+        def run(sender: ActorRef, msg: Any): Option[TestActor.AutoPilot] =
+          msg match {
+            case "stop" ⇒ None
+            case x      ⇒ testActor.tell(x, sender); Some(this)
+          }
+      })
+      //#autopilot
+      probe.ref ! "hallo"
+      probe.ref ! "welt"
+      probe.ref ! "stop"
+      expectMsg("hallo")
+      expectMsg("welt")
+      probe.expectMsg("hallo")
+      probe.expectMsg("welt")
+      probe.expectMsg("stop")
+      probe.ref ! "hallo"
+      probe.expectMsg("hallo")
+      testActor ! "end"
+      expectMsg("end") // verify that "hallo" did not get through
+    }
+
+    "be able to expect primitive types" in {
+      for (_ ← 1 to 4) testActor ! 42
+      expectMsgType[Int] must be(42)
+      expectMsgAnyClassOf(classOf[Int]) must be(42)
+      expectMsgAllClassOf(classOf[Int]) must be(Seq(42))
+      expectMsgAllConformingOf(classOf[Int]) must be(Seq(42))
+    }
+
   }
 
 }

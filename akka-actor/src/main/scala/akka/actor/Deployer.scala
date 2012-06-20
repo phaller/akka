@@ -7,7 +7,10 @@ package akka.actor
 import akka.util.Duration
 import com.typesafe.config._
 import akka.routing._
-import java.util.concurrent.{ TimeUnit, ConcurrentHashMap }
+import java.util.concurrent.{ TimeUnit }
+import akka.util.WildcardTree
+import java.util.concurrent.atomic.AtomicReference
+import annotation.tailrec
 
 /**
  * This class represents deployment configuration for a given actor path. It is
@@ -31,8 +34,19 @@ final case class Deploy(
   routerConfig: RouterConfig = NoRouter,
   scope: Scope = NoScopeGiven) {
 
+  /**
+   * Java API to create a Deploy with the given RouterConfig
+   */
   def this(routing: RouterConfig) = this("", ConfigFactory.empty, routing)
+
+  /**
+   * Java API to create a Deploy with the given RouterConfig with Scope
+   */
   def this(routing: RouterConfig, scope: Scope) = this("", ConfigFactory.empty, routing, scope)
+
+  /**
+   * Java API to create a Deploy with the given Scope
+   */
   def this(scope: Scope) = this("", ConfigFactory.empty, NoRouter, scope)
 
   /**
@@ -63,11 +77,14 @@ trait Scope {
 }
 
 //TODO add @SerialVersionUID(1L) when SI-4804 is fixed
-case object LocalScope extends Scope {
+abstract class LocalScope extends Scope
+
+//FIXME docs
+case object LocalScope extends LocalScope {
   /**
-   * Java API
+   * Java API: get the singleton instance
    */
-  def scope: Scope = this
+  def getInstance = this
 
   def withFallback(other: Scope): Scope = this
 }
@@ -76,8 +93,14 @@ case object LocalScope extends Scope {
  * This is the default value and as such allows overrides.
  */
 //TODO add @SerialVersionUID(1L) when SI-4804 is fixed
-case object NoScopeGiven extends Scope {
+abstract class NoScopeGiven extends Scope
+case object NoScopeGiven extends NoScopeGiven {
   def withFallback(other: Scope): Scope = other
+
+  /**
+   * Java API: get the singleton instance
+   */
+  def getInstance = this
 }
 
 /**
@@ -85,24 +108,34 @@ case object NoScopeGiven extends Scope {
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-class Deployer(val settings: ActorSystem.Settings, val dynamicAccess: DynamicAccess) {
+private[akka] class Deployer(val settings: ActorSystem.Settings, val dynamicAccess: DynamicAccess) {
 
   import scala.collection.JavaConverters._
 
-  private val deployments = new ConcurrentHashMap[String, Deploy]
+  private val deployments = new AtomicReference(WildcardTree[Deploy]())
   private val config = settings.config.getConfig("akka.actor.deployment")
   protected val default = config.getConfig("default")
+
   config.root.asScala flatMap {
     case ("default", _)             ⇒ None
     case (key, value: ConfigObject) ⇒ parseConfig(key, value.toConfig)
     case _                          ⇒ None
   } foreach deploy
 
-  def lookup(path: String): Option[Deploy] = Option(deployments.get(path))
+  def lookup(path: ActorPath): Option[Deploy] = lookup(path.elements.drop(1).iterator)
 
-  def deploy(d: Deploy): Unit = deployments.put(d.path, d)
+  def lookup(path: Iterable[String]): Option[Deploy] = lookup(path.iterator)
 
-  protected def parseConfig(key: String, config: Config): Option[Deploy] = {
+  def lookup(path: Iterator[String]): Option[Deploy] = deployments.get().find(path).data
+
+  def deploy(d: Deploy): Unit = {
+    @tailrec def add(path: Array[String], d: Deploy, w: WildcardTree[Deploy] = deployments.get): Unit =
+      if (!deployments.compareAndSet(w, w.insert(path.iterator, d))) add(path, d)
+
+    add(d.path.split("/").drop(1), d)
+  }
+
+  def parseConfig(key: String, config: Config): Option[Deploy] = {
 
     val deployment = config.withFallback(default)
 
@@ -112,11 +145,7 @@ class Deployer(val settings: ActorSystem.Settings, val dynamicAccess: DynamicAcc
 
     val within = Duration(deployment.getMilliseconds("within"), TimeUnit.MILLISECONDS)
 
-    val resizer: Option[Resizer] = if (config.hasPath("resizer")) {
-      Some(DefaultResizer(deployment.getConfig("resizer")))
-    } else {
-      None
-    }
+    val resizer: Option[Resizer] = if (config.hasPath("resizer")) Some(DefaultResizer(deployment.getConfig("resizer"))) else None
 
     val router: RouterConfig = deployment.getString("router") match {
       case "from-code"        ⇒ NoRouter
@@ -140,5 +169,4 @@ class Deployer(val settings: ActorSystem.Settings, val dynamicAccess: DynamicAcc
 
     Some(Deploy(key, deployment, router, NoScopeGiven))
   }
-
 }

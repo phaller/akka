@@ -1,16 +1,12 @@
 Dataflow Concurrency (Scala)
 ============================
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
-
 Description
 -----------
 
 Akka implements `Oz-style dataflow concurrency <http://www.mozart-oz.org/documentation/tutorial/node8.html#chapter.concurrency>`_ by using a special API for :ref:`futures-scala` that allows single assignment variables and multiple lightweight (event-based) processes/threads.
 
-Dataflow concurrency is deterministic. This means that it will always behave the same. If you run it once and it yields output 5 then it will do that **every time**, run it 10 million times, same result. If it on the other hand deadlocks the first time you run it, then it will deadlock **every single time** you run it. Also, there is **no difference** between sequential code and concurrent code. These properties makes it very easy to reason about concurrency. The limitation is that the code needs to be side-effect free, e.g. deterministic. You can't use exceptions, time, random etc., but need to treat the part of your program that uses dataflow concurrency as a pure function with input and output.
+Dataflow Concurrency has its origin in logic programming and is declarative and fully deterministic. This means that it will always behave the same. If you run it once and it yields output ``5`` then it will do that **every time**, run it 10 million times, same result. If it on the other hand deadlocks the first time you run it, then it will deadlock **every single time** you run it. Also, there is **no difference** between sequential code and concurrent code. These properties makes it very easy to reason about concurrency. The limitation is that the code needs to be side-effect free, e.g. deterministic. You can't use exceptions, time, random etc., but need to treat the part of your program that uses dataflow concurrency as a pure function with input and output.
 
 The best way to learn how to program with dataflow variables is to read the fantastic book `Concepts, Techniques, and Models of Computer Programming <http://www.info.ucl.ac.be/%7Epvr/book.html>`_. By Peter Van Roy and Seif Haridi.
 
@@ -26,12 +22,18 @@ Scala's Delimited Continuations plugin is required to use the Dataflow API. To e
 
 .. code-block:: scala
 
-  import sbt._
+  autoCompilerPlugins := true,
+  libraryDependencies <+= scalaVersion { v => compilerPlugin("org.scala-lang.plugins" % "continuations" % <scalaVersion>) },
+  scalacOptions += "-P:continuations:enable",
 
-  class MyAkkaProject(info: ProjectInfo) extends DefaultProject(info) with AkkaProject with AutoCompilerPlugins {
-    val continuationsPlugin = compilerPlugin("org.scala-lang.plugins" % "continuations" % "2.9.1")
-    override def compileOptions = super.compileOptions ++ compileOptions("-P:continuations:enable")
-  }
+To use the DataFlow library you have to provide an implicit ExecutionContext, here is an example:
+
+.. code-block:: scala
+
+  import akka.dispatch._
+  import java.util.concurrent.Executors
+
+  implicit val ec = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(..))
 
 Dataflow Variables
 ------------------
@@ -72,7 +74,7 @@ Dataflow is implemented in Akka using Scala's Delimited Continuations. To use th
 .. code-block:: scala
 
   import Future.flow
-  implicit val dispatcher = ...
+  implicit val executionContext = ...
 
   val a = Future( ... )
   val b = Future( ... )
@@ -89,7 +91,7 @@ The ``flow`` method also returns a ``Future`` for the result of the contained ex
 .. code-block:: scala
 
   import Future.flow
-  implicit val dispatcher = ...
+  implicit val executionContext = ...
 
   val a = Future( ... )
   val b = Future( ... )
@@ -117,13 +119,13 @@ To run these examples:
 
 ::
 
-  Welcome to Scala version 2.9.0 (Java HotSpot(TM) 64-Bit Server VM, Java 1.6.0_25).
+  Welcome to Scala version 2.9.1 (Java HotSpot(TM) 64-Bit Server VM, Java 1.6.0_25).
   Type in expressions to have them evaluated.
   Type :help for more information.
 
   scala>
 
-2. Paste the examples (below) into the Scala REPL.
+2. Paste the examples (below) into the Scala REPL. Paste in each of the ``flow`` blocks at a time to see data flow in action.
 Note: Do not try to run the Oz version, it is only there for reference.
 
 3. Have fun.
@@ -151,7 +153,9 @@ Example in Akka:
 
   import akka.dispatch._
   import Future.flow
-  implicit val dispatcher = ...
+  import java.util.concurrent.Executors
+
+  implicit val ec = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(4))
 
   val x, y, z = Promise[Int]()
 
@@ -196,7 +200,9 @@ Example in Akka:
 
   import akka.dispatch._
   import Future.flow
-  implicit val dispatcher = ...
+  import java.util.concurrent.Executors
+
+  implicit val ec = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(4))
 
   def ints(n: Int, max: Int): List[Int] = {
     if (n == max) Nil
@@ -225,7 +231,9 @@ Example in Akka:
 
   import akka.dispatch._
   import Future.flow
-  implicit val dispatcher = ...
+  import java.util.concurrent.Executors
+
+  implicit val ec = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(4))
 
   // create four 'Int' data flow variables
   val x, y, z, v = Promise[Int]()

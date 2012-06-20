@@ -10,6 +10,7 @@ import akka.pattern.ask
 import akka.util.Duration
 import java.util.concurrent.TimeUnit
 import akka.util.Timeout
+import org.zeromq.ZMQException
 
 /**
  * A Model to represent a version of the zeromq library
@@ -18,7 +19,7 @@ import akka.util.Timeout
  * @param patch
  */
 case class ZeroMQVersion(major: Int, minor: Int, patch: Int) {
-  override def toString = "%d.%d.%d".format(major, minor, patch)
+  override def toString: String = "%d.%d.%d".format(major, minor, patch)
 }
 
 /**
@@ -26,17 +27,14 @@ case class ZeroMQVersion(major: Int, minor: Int, patch: Int) {
  */
 object ZeroMQExtension extends ExtensionId[ZeroMQExtension] with ExtensionIdProvider {
   override def get(system: ActorSystem): ZeroMQExtension = super.get(system)
-  def lookup() = this
-  def createExtension(system: ExtendedActorSystem) = new ZeroMQExtension(system)
+  def lookup(): this.type = this
+  override def createExtension(system: ExtendedActorSystem): ZeroMQExtension = new ZeroMQExtension(system)
 
   private val minVersionString = "2.1.0"
   private val minVersion = JZMQ.makeVersion(2, 1, 0)
 
-  private[zeromq] def check[TOption <: SocketOption: Manifest](parameters: Seq[SocketOption]) = {
-    parameters exists { p ⇒
-      ClassManifest.singleType(p) <:< manifest[TOption]
-    }
-  }
+  private[zeromq] def check[TOption <: SocketOption: Manifest](parameters: Seq[SocketOption]) =
+    parameters exists { p ⇒ ClassManifest.singleType(p) <:< manifest[TOption] }
 }
 
 /**
@@ -46,16 +44,14 @@ object ZeroMQExtension extends ExtensionId[ZeroMQExtension] with ExtensionIdProv
  */
 class ZeroMQExtension(system: ActorSystem) extends Extension {
 
-  val DefaultPollTimeout = Duration(system.settings.config.getMilliseconds("akka.zeromq.poll-timeout"), TimeUnit.MILLISECONDS)
-  val NewSocketTimeout = Timeout(Duration(system.settings.config.getMilliseconds("akka.zeromq.new-socket-timeout"), TimeUnit.MILLISECONDS))
+  val DefaultPollTimeout: Duration = Duration(system.settings.config.getMilliseconds("akka.zeromq.poll-timeout"), TimeUnit.MILLISECONDS)
+  val NewSocketTimeout: Timeout = Timeout(Duration(system.settings.config.getMilliseconds("akka.zeromq.new-socket-timeout"), TimeUnit.MILLISECONDS))
 
   /**
    * The version of the ZeroMQ library
    * @return a [[akka.zeromq.ZeroMQVersion]]
    */
-  def version = {
-    ZeroMQVersion(JZMQ.getMajorVersion, JZMQ.getMinorVersion, JZMQ.getPatchVersion)
-  }
+  def version: ZeroMQVersion = ZeroMQVersion(JZMQ.getMajorVersion, JZMQ.getMinorVersion, JZMQ.getPatchVersion)
 
   /**
    * Factory method to create the [[akka.actor.Props]] to build the ZeroMQ socket actor.
@@ -143,8 +139,7 @@ class ZeroMQExtension(system: ActorSystem) extends Extension {
    */
   def newSocket(socketParameters: SocketOption*): ActorRef = {
     implicit val timeout = NewSocketTimeout
-    val req = (zeromqGuardian ? newSocketProps(socketParameters: _*)).mapTo[ActorRef]
-    Await.result(req, timeout.duration)
+    Await.result((zeromqGuardian ? newSocketProps(socketParameters: _*)).mapTo[ActorRef], timeout.duration)
   }
 
   /**
@@ -239,7 +234,19 @@ class ZeroMQExtension(system: ActorSystem) extends Extension {
 
   private val zeromqGuardian: ActorRef = {
     verifyZeroMQVersion
+
     system.actorOf(Props(new Actor {
+      import SupervisorStrategy._
+      override def supervisorStrategy = OneForOneStrategy() {
+        case ex: ZMQException if nonfatal(ex) ⇒ Resume
+        case _                                ⇒ Stop
+      }
+
+      private def nonfatal(ex: ZMQException) = ex.getErrorCode match {
+        case org.zeromq.ZeroMQ.EFSM | 45 /* ENOTSUP */ ⇒ true
+        case _                                         ⇒ false
+      }
+
       def receive = { case p: Props ⇒ sender ! context.actorOf(p) }
     }), "zeromq")
   }

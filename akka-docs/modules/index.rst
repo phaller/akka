@@ -6,6 +6,4 @@ Modules
 
    durable-mailbox
    http
-   microkernel
    camel
-   spring

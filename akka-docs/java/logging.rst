@@ -4,9 +4,6 @@
  Logging (Java)
 ################
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
 
 How to Log
 ==========
@@ -14,7 +11,7 @@ How to Log
 Create a ``LoggingAdapter`` and use the ``error``, ``warning``, ``info``, or ``debug`` methods,
 as illustrated in this example:
 
-.. includecode:: code/akka/docs/event/LoggingDocTestBase.java
+.. includecode:: code/docs/event/LoggingDocTestBase.java
    :include: imports,my-actor
 
 The first parameter to ``Logging.getLogger`` could also be any
@@ -30,8 +27,13 @@ object is translated to a String according to the following rules:
   * in case of a class an approximation of its simpleName
   * and in all other cases the simpleName of its class
 
-The log message may contain argument placeholders ``{}``, which will be substituted if the log level
-is enabled.
+The log message may contain argument placeholders ``{}``, which will be
+substituted if the log level is enabled. Giving more arguments as there are
+placeholders results in a warning being appended to the log statement (i.e. on
+the same line with the same severity). You may pass a Java array as the only
+substitution argument to have its elements be treated individually:
+
+.. includecode:: code/docs/event/LoggingDocTestBase.java#array
 
 The Java :class:`Class` of the log source is also included in the generated
 :class:`LogEvent`. In case of a simple string this is replaced with a “marker”
@@ -70,9 +72,11 @@ by Actors:
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of all AutoReceiveMessages (Kill, PoisonPill and the like)
-        autoreceive = on
+      actor {
+        debug {
+          # enable DEBUG logging of all AutoReceiveMessages (Kill, PoisonPill and the like)
+          autoreceive = on
+        }
       }
     }
 
@@ -81,9 +85,11 @@ If you want very detailed logging of all lifecycle changes of Actors (restarts, 
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of actor lifecycle changes
-        lifecycle = on
+      actor {
+        debug {
+          # enable DEBUG logging of actor lifecycle changes
+          lifecycle = on
+        }
       }
     }
 
@@ -92,9 +98,11 @@ If you want very detailed logging of all events, transitions and timers of FSM A
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of all LoggingFSMs for events, transitions and timers
-        fsm = on
+      actor {
+        debug {
+          # enable DEBUG logging of all LoggingFSMs for events, transitions and timers
+          fsm = on
+        }
       }
     }
 
@@ -103,9 +111,11 @@ If you want to monitor subscriptions (subscribe/unsubscribe) on the ActorSystem.
 .. code-block:: ruby
 
     akka {
-      debug {
-        # enable DEBUG logging of subscription changes on the eventStream
-        event-stream = on
+      actor {
+        debug {
+          # enable DEBUG logging of subscription changes on the eventStream
+          event-stream = on
+        }
       }
     }
 
@@ -160,7 +170,7 @@ event handler available in the 'akka-slf4j' module.
 
 Example of creating a listener:
 
-.. includecode:: code/akka/docs/event/LoggingDocTestBase.java
+.. includecode:: code/docs/event/LoggingDocTestBase.java
    :include: imports,imports-listener,my-event-listener
 
 
@@ -177,7 +187,7 @@ It has one single dependency; the slf4j-api jar. In runtime you also need a SLF4
      <dependency>
        <groupId>ch.qos.logback</groupId>
        <artifactId>logback-classic</artifactId>
-       <version>1.0.0</version>
+       <version>1.0.4</version>
        <scope>runtime</scope>
      </dependency>
 
@@ -201,7 +211,7 @@ the first case and ``LoggerFactory.getLogger(String s)`` in the second).
 
 .. note::
 
-  Beware that the the actor system’s name is appended to a :class:`String` log
+  Beware that the actor system’s name is appended to a :class:`String` log
   source if the LoggingAdapter was created giving an :class:`ActorSystem` to
   the factory. If this is not intended, give a :class:`LoggingBus` instead as
   shown below:

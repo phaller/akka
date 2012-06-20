@@ -7,11 +7,10 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import org.junit.runner.RunWith
 
-import akka.actor.actorRef2Scala
-import akka.actor.{ Props, LocalActorRef, Deploy, Actor }
-import akka.config.ConfigurationException
+import akka.actor.{ Props, LocalActorRef, Deploy, Actor, ActorRef }
+import akka.ConfigurationException
 import akka.dispatch.Await
-import akka.pattern.ask
+import akka.pattern.{ ask, gracefulStop }
 import akka.testkit.{ TestLatch, ImplicitSender, DefaultTimeout, AkkaSpec }
 import akka.util.duration.intToDurationInt
 
@@ -31,6 +30,14 @@ object ConfiguredLocalRoutingSpec {
             router = random
             nr-of-instances = 4
           }
+          /weird {
+            router = round-robin
+            nr-of-instances = 3
+          }
+          "/weird/*" {
+            router = round-robin
+            nr-of-instances = 2
+          }
         }
       }
     }
@@ -49,7 +56,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.con
         }
       }).withRouter(RoundRobinRouter(12)), "someOther")
       actor.asInstanceOf[LocalActorRef].underlying.props.routerConfig must be === RoundRobinRouter(12)
-      system.stop(actor)
+      Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in config" in {
@@ -59,7 +66,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.con
         }
       }).withRouter(RoundRobinRouter(12)), "config")
       actor.asInstanceOf[LocalActorRef].underlying.props.routerConfig must be === RandomRouter(4)
-      system.stop(actor)
+      Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in explicit deployment" in {
@@ -69,7 +76,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.con
         }
       }).withRouter(FromConfig).withDeploy(Deploy(routerConfig = RoundRobinRouter(12))), "someOther")
       actor.asInstanceOf[LocalActorRef].underlying.props.routerConfig must be === RoundRobinRouter(12)
-      system.stop(actor)
+      Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in config even with explicit deployment" in {
@@ -79,13 +86,24 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.con
         }
       }).withRouter(FromConfig).withDeploy(Deploy(routerConfig = RoundRobinRouter(12))), "config")
       actor.asInstanceOf[LocalActorRef].underlying.props.routerConfig must be === RandomRouter(4)
-      system.stop(actor)
+      Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "fail with an exception if not correct" in {
       intercept[ConfigurationException] {
         system.actorOf(Props.empty.withRouter(FromConfig))
       }
+    }
+
+    "not get confused when trying to wildcard-configure children" in {
+      val router = system.actorOf(Props(new Actor {
+        testActor ! self
+        def receive = { case _ ⇒ }
+      }).withRouter(FromConfig), "weird")
+      val recv = Set() ++ (for (_ ← 1 to 3) yield expectMsgType[ActorRef])
+      val expc = Set('a', 'b', 'c') map (i ⇒ system.actorFor("/user/weird/$" + i))
+      recv must be(expc)
+      expectNoMsg(1 second)
     }
 
   }

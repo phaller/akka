@@ -5,10 +5,6 @@
 #################
 
 
-.. sidebar:: Contents
-
-   .. contents:: :local:
-
 For an introduction of remoting capabilities of Akka please see :ref:`remoting`.
 
 Preparing your ActorSystem for Remoting
@@ -16,7 +12,7 @@ Preparing your ActorSystem for Remoting
 
 The Akka remoting is a separate jar file. Make sure that you have the following dependency in your project::
 
-  "com.typesafe.akka" % "akka-remote" % "2.0-SNAPSHOT"
+  "com.typesafe.akka" % "akka-remote" % "2.1-SNAPSHOT"
 
 To enable remote capabilities in your Akka project you should, at a minimum, add the following changes
 to your ``application.conf`` file::
@@ -109,6 +105,14 @@ Once you have configured the properties above you would do the following in code
 ``SampleActor`` has to be available to the runtimes using it, i.e. the classloader of the
 actor systems has to have a JAR containing the class.
 
+.. note::
+
+  In order to ensure serializability of ``Props`` when passing constructor
+  arguments to the actor being created, do not make the factory an inner class:
+  this will inherently capture a reference to its enclosing object, which in
+  most cases is not serializable. It is best to create a factory method in the
+  companion object of the actor’s class.
+
 Programmatic Remote Deployment
 ------------------------------
 
@@ -120,15 +124,15 @@ precedence.
 
 With these imports:
 
-.. includecode:: code/akka/docs/remoting/RemoteDeploymentDocSpec.scala#import
+.. includecode:: code/docs/remoting/RemoteDeploymentDocSpec.scala#import
 
 and a remote address like this:
 
-.. includecode:: code/akka/docs/remoting/RemoteDeploymentDocSpec.scala#make-address
+.. includecode:: code/docs/remoting/RemoteDeploymentDocSpec.scala#make-address
 
 you can advise the system to create a child on that remote node like so:
 
-.. includecode:: code/akka/docs/remoting/RemoteDeploymentDocSpec.scala#deploy
+.. includecode:: code/docs/remoting/RemoteDeploymentDocSpec.scala#deploy
 
 Serialization
 ^^^^^^^^^^^^^
@@ -166,7 +170,7 @@ Description of the Remoting Sample
 
 There is a more extensive remote example that comes with the Akka distribution.
 Please have a look here for more information: `Remote Sample
-<https://github.com/jboner/akka/tree/master/akka-samples/akka-sample-remote>`_
+<https://github.com/akka/akka/tree/master/akka-samples/akka-sample-remote>`_
 This sample demonstrates both, remote deployment and look-up of remote actors.
 First, let us have a look at the common setup for both scenarios (this is
 ``common.conf``):
@@ -261,5 +265,104 @@ Observe how the name of the server actor matches the deployment given in the
 configuration file, which will transparently delegate the actor creation to the
 remote node.
 
+Remote Events
+-------------
 
+It is possible to listen to events that occur in Akka Remote, and to subscribe/unsubscribe to there events,
+you simply register as listener to the below described types in on the ``ActorSystem.eventStream``.
 
+.. note::
+    To subscribe to any outbound-related events, subscribe to ``RemoteClientLifeCycleEvent``
+    To subscribe to any inbound-related events, subscribe to ``RemoteServerLifeCycleEvent``
+    To subscribe to any remote events, subscribe to ``RemoteLifeCycleEvent``
+
+To intercept when an outbound connection is disconnected, you listen to ``RemoteClientDisconnected`` which
+holds the transport used (RemoteTransport) and the outbound address that was disconnected (Address).
+
+To intercept when an outbound connection is connected, you listen to ``RemoteClientConnected`` which
+holds the transport used (RemoteTransport) and the outbound address that was connected to (Address).
+
+To intercept when an outbound client is started you listen to ``RemoteClientStarted``
+which holds the transport used (RemoteTransport) and the outbound address that it is connected to (Address).
+
+To intercept when an outbound client is shut down you listen to ``RemoteClientShutdown``
+which holds the transport used (RemoteTransport) and the outbound address that it was connected to (Address).
+
+For general outbound-related errors, that do not classify as any of the others, you can listen to ``RemoteClientError``,
+which holds the cause (Throwable), the transport used (RemoteTransport) and the outbound address (Address).
+
+To intercept when an inbound server is started (typically only once) you listen to ``RemoteServerStarted``
+which holds the transport that it will use (RemoteTransport).
+
+To intercept when an inbound server is shut down (typically only once) you listen to ``RemoteServerShutdown``
+which holds the transport that it used (RemoteTransport).
+
+To intercept when an inbound connection has been established you listen to ``RemoteServerClientConnected``
+which holds the transport used (RemoteTransport) and optionally the address that connected (Option[Address]).
+
+To intercept when an inbound connection has been disconnected you listen to ``RemoteServerClientDisconnected``
+which holds the transport used (RemoteTransport) and optionally the address that disconnected (Option[Address]).
+
+To intercept when an inbound remote client has been closed you listen to ``RemoteServerClientClosed``
+which holds the transport used (RemoteTransport) and optionally the address of the remote client that was closed (Option[Address]).
+
+Remote Security
+^^^^^^^^^^^^^^^
+
+Akka provides a couple of ways to enhance security between remote nodes (client/server):
+
+* Untrusted Mode
+* Security Cookie Handshake
+
+Untrusted Mode
+--------------
+
+You can enable untrusted mode for preventing system messages to be send by clients, e.g. messages like.
+This will prevent the client to send these messages to the server:
+
+* ``Create``
+* ``Recreate``
+* ``Suspend``
+* ``Resume``
+* ``Terminate``
+* ``Supervise``
+* ``ChildTerminated``
+* ``Link``
+* ``Unlink``
+
+Here is how to turn it on in the config::
+
+    akka {
+      actor {
+        remote {
+          untrusted-mode = on
+        }
+      }
+    }
+
+Secure Cookie Handshake
+-----------------------
+
+Akka remoting also allows you to specify a secure cookie that will be exchanged and ensured to be identical
+in the connection handshake between the client and the server. If they are not identical then the client
+will be refused to connect to the server.
+
+The secure cookie can be any kind of string. But the recommended approach is to generate a cryptographically
+secure cookie using this script ``$AKKA_HOME/scripts/generate_config_with_secure_cookie.sh`` or from code
+using the ``akka.util.Crypt.generateSecureCookie()`` utility method.
+
+You have to ensure that both the connecting client and the server have the same secure cookie as well
+as the ``require-cookie`` option turned on.
+
+Here is an example config::
+
+    akka {
+      actor {
+        remote {
+          netty {
+            secure-cookie = "090A030E0F0A05010900000A0C0E0C0B03050D05"
+            require-cookie = on
+          }
+        }
+      }
+    }

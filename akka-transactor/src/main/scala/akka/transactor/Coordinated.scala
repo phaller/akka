@@ -12,19 +12,29 @@ import java.util.concurrent.Callable
 /**
  * Akka-specific exception for coordinated transactions.
  */
-class CoordinatedTransactionException(message: String, cause: Throwable = null) extends AkkaException(message, cause) {
-  def this(msg: String) = this(msg, null);
+class CoordinatedTransactionException(message: String, cause: Throwable) extends AkkaException(message, cause) {
+  def this(msg: String) = this(msg, null)
 }
 
 /**
  * Coordinated transactions across actors.
  */
 object Coordinated {
-  def apply(message: Any = null)(implicit timeout: Timeout) = new Coordinated(message, createInitialMember(timeout))
 
+  /**
+   * Creates a new Coordinated with the given message and Timeout
+   * @param message - the message which will be coordinated
+   * @param timeout - the timeout for the coordination
+   * @return a new Coordinated
+   */
+  def apply(message: Any = null)(implicit timeout: Timeout): Coordinated =
+    new Coordinated(message, CommitBarrier(timeout.duration.toMillis).addMember())
+
+  /**
+   * @param c - a Coordinated to be unapplied
+   * @return the message associated with the given Coordinated
+   */
   def unapply(c: Coordinated): Option[Any] = Some(c.message)
-
-  def createInitialMember(timeout: Timeout) = CommitBarrier(timeout.duration.toMillis).addMember()
 }
 
 /**
@@ -91,34 +101,32 @@ class Coordinated(val message: Any, member: CommitBarrier.Member) {
 
   // Java API constructors
 
-  def this(message: Any, timeout: Timeout) = this(message, Coordinated.createInitialMember(timeout))
+  def this(message: Any, timeout: Timeout) = this(message, CommitBarrier(timeout.duration.toMillis).addMember())
 
-  def this(timeout: Timeout) = this(null, Coordinated.createInitialMember(timeout))
+  def this(timeout: Timeout) = this(null, timeout)
 
   /**
    * Create a new Coordinated object and increment the number of members by one.
    * Use this method to ''pass on'' the coordination.
    */
-  def apply(msg: Any) = {
-    new Coordinated(msg, member.commitBarrier.addMember())
-  }
+  def apply(msg: Any): Coordinated = new Coordinated(msg, member.commitBarrier.addMember())
 
   /**
    * Create a new Coordinated object but *do not* increment the number of members by one.
    * Only use this method if you know this is what you need.
    */
-  def noIncrement(msg: Any) = new Coordinated(msg, member)
+  def noIncrement(msg: Any): Coordinated = new Coordinated(msg, member)
 
   /**
    * Java API: get the message for this Coordinated.
    */
-  def getMessage() = message
+  def getMessage(): Any = message
 
   /**
    * Java API: create a new Coordinated object and increment the number of members by one.
    * Use this method to ''pass on'' the coordination.
    */
-  def coordinate(msg: Any) = apply(msg)
+  def coordinate(msg: Any): Coordinated = apply(msg)
 
   /**
    * Delimits the coordinated transaction. The transaction will wait for all other transactions
@@ -158,10 +166,10 @@ class Coordinated(val message: Any, member: CommitBarrier.Member) {
    * An empty coordinated atomic block. Can be used to complete the number of members involved
    * and wait for all transactions to complete.
    */
-  def await() = atomic(txn ⇒ ())
+  def await(): Unit = atomic(txn ⇒ ())
 
   /**
    * Cancel this Coordinated transaction.
    */
-  def cancel(info: Any) = member.cancel(CommitBarrier.UserCancel(info))
+  def cancel(info: Any): Unit = member.cancel(CommitBarrier.UserCancel(info))
 }

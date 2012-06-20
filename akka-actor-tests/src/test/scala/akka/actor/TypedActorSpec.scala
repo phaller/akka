@@ -12,13 +12,14 @@ import java.util.concurrent.atomic.AtomicReference
 import annotation.tailrec
 import akka.testkit.{ EventFilter, filterEvents, AkkaSpec }
 import akka.serialization.SerializationExtension
-import akka.actor.TypedActor.{ PostRestart, PreRestart, PostStop, PreStart }
-import java.util.concurrent.{ TimeUnit, CountDownLatch }
 import akka.japi.{ Creator, Option ⇒ JOption }
 import akka.testkit.DefaultTimeout
 import akka.dispatch.{ Await, Dispatchers, Future, Promise }
 import akka.pattern.ask
 import akka.serialization.JavaSerializer
+import akka.actor.TypedActor._
+import java.lang.IllegalStateException
+import java.util.concurrent.{ TimeoutException, TimeUnit, CountDownLatch }
 
 object TypedActorSpec {
 
@@ -63,6 +64,7 @@ object TypedActorSpec {
   trait Foo {
     def pigdog(): String
 
+    @throws(classOf[TimeoutException])
     def self = TypedActor.self[Foo]
 
     def futurePigdog(): Future[String]
@@ -75,20 +77,26 @@ object TypedActorSpec {
 
     def failingFuturePigdog(): Future[String] = throw new IllegalStateException("expected")
 
+    @throws(classOf[TimeoutException])
     def failingOptionPigdog(): Option[String] = throw new IllegalStateException("expected")
 
+    @throws(classOf[TimeoutException])
     def failingJOptionPigdog(): JOption[String] = throw new IllegalStateException("expected")
 
     def failingPigdog(): Unit = throw new IllegalStateException("expected")
 
+    @throws(classOf[TimeoutException])
     def optionPigdog(): Option[String]
 
+    @throws(classOf[TimeoutException])
     def optionPigdog(delay: Long): Option[String]
 
+    @throws(classOf[TimeoutException])
     def joptionPigdog(delay: Long): JOption[String]
 
     def incr()
 
+    @throws(classOf[TimeoutException])
     def read(): Int
 
     def testMethodCallSerialization(foo: Foo, s: String, i: Int): Unit = throw new IllegalStateException("expected")
@@ -160,17 +168,29 @@ object TypedActorSpec {
     def crash(): Unit
   }
 
-  class LifeCyclesImpl(val latch: CountDownLatch) extends PreStart with PostStop with PreRestart with PostRestart with LifeCycles {
+  class LifeCyclesImpl(val latch: CountDownLatch) extends PreStart with PostStop with PreRestart with PostRestart with LifeCycles with Receiver {
+
+    private def ensureContextAvailable[T](f: ⇒ T): T = TypedActor.context match {
+      case null ⇒ throw new IllegalStateException("TypedActor.context is null!")
+      case some ⇒ f
+    }
 
     override def crash(): Unit = throw new IllegalStateException("Crash!")
 
-    override def preStart(): Unit = latch.countDown()
+    override def preStart(): Unit = ensureContextAvailable(latch.countDown())
 
-    override def postStop(): Unit = for (i ← 1 to 3) latch.countDown()
+    override def postStop(): Unit = ensureContextAvailable(for (i ← 1 to 3) latch.countDown())
 
-    override def preRestart(reason: Throwable, message: Option[Any]): Unit = for (i ← 1 to 5) latch.countDown()
+    override def preRestart(reason: Throwable, message: Option[Any]): Unit = ensureContextAvailable(for (i ← 1 to 5) latch.countDown())
 
-    override def postRestart(reason: Throwable): Unit = for (i ← 1 to 7) latch.countDown()
+    override def postRestart(reason: Throwable): Unit = ensureContextAvailable(for (i ← 1 to 7) latch.countDown())
+
+    override def onReceive(msg: Any, sender: ActorRef): Unit = {
+      ensureContextAvailable(
+        msg match {
+          case "pigdog" ⇒ sender ! "dogpig"
+        })
+    }
   }
 }
 
@@ -287,7 +307,7 @@ class TypedActorSpec extends AkkaSpec(TypedActorSpec.config)
     "be able to call methods returning Scala Options" in {
       val t = newFooBar(Duration(500, "ms"))
       t.optionPigdog(200).get must be("Pigdog")
-      t.optionPigdog(700) must be(None)
+      t.optionPigdog(1000) must be(None)
       mustStop(t)
     }
 
@@ -408,6 +428,31 @@ class TypedActorSpec extends AkkaSpec(TypedActorSpec.config)
       }
     }
 
+    "be able to serialize and deserialize proxies" in {
+      import java.io._
+      JavaSerializer.currentSystem.withValue(system.asInstanceOf[ExtendedActorSystem]) {
+        val t = newFooBar(Duration(2, "s"))
+
+        t.optionPigdog() must be === Some("Pigdog")
+
+        val baos = new ByteArrayOutputStream(8192 * 4)
+        val out = new ObjectOutputStream(baos)
+
+        out.writeObject(t)
+        out.close()
+
+        val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
+
+        val tNew = in.readObject().asInstanceOf[Foo]
+
+        tNew must be === t
+
+        tNew.optionPigdog() must be === Some("Pigdog")
+
+        mustStop(t)
+      }
+    }
+
     "be able to override lifecycle callbacks" in {
       val latch = new CountDownLatch(16)
       val ta = TypedActor(system)
@@ -415,6 +460,16 @@ class TypedActorSpec extends AkkaSpec(TypedActorSpec.config)
       EventFilter[IllegalStateException]("Crash!", occurrences = 1) intercept {
         t.crash()
       }
+
+      //Sneak in a check for the Receiver override
+      val ref = ta getActorRefFor t
+
+      ref.tell("pigdog", testActor)
+
+      expectMsg(timeout.duration, "dogpig")
+
+      //Done with that now
+
       ta.poisonPill(t)
       latch.await(10, TimeUnit.SECONDS) must be === true
     }
