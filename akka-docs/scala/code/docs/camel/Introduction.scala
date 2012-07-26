@@ -3,8 +3,11 @@ package docs.camel
 import akka.actor.{ Props, ActorSystem }
 import akka.camel.CamelExtension
 
+import language.postfixOps
+import akka.util.Timeout
+
 object Introduction {
-  {
+  def foo = {
     //#Consumer-mina
     import akka.camel.{ CamelMessage, Consumer }
 
@@ -24,7 +27,7 @@ object Introduction {
     val mina = system.actorOf(Props[MyEndpoint])
     //#Consumer-mina
   }
-  {
+  def bar = {
     //#Consumer
     import akka.camel.{ CamelMessage, Consumer }
 
@@ -38,7 +41,7 @@ object Introduction {
     }
     //#Consumer
   }
-  {
+  def baz = {
     //#Producer
     import akka.actor.Actor
     import akka.camel.{ Producer, Oneway }
@@ -75,7 +78,7 @@ object Introduction {
   {
     //#CamelActivation
     import akka.camel.{ CamelMessage, Consumer }
-    import akka.util.duration._
+    import scala.concurrent.util.duration._
 
     class MyEndpoint extends Consumer {
       def endpointUri = "mina:tcp://localhost:6200?textline=true"
@@ -89,16 +92,12 @@ object Introduction {
     val camel = CamelExtension(system)
     val actorRef = system.actorOf(Props[MyEndpoint])
     // get a future reference to the activation of the endpoint of the Consumer Actor
-    val activationFuture = camel.activationFutureFor(actorRef, 10 seconds)
-    // or, block wait on the activation
-    camel.awaitActivation(actorRef, 10 seconds)
+    val activationFuture = camel.activationFutureFor(actorRef)(timeout = 10 seconds)
     //#CamelActivation
     //#CamelDeactivation
     system.stop(actorRef)
     // get a future reference to the deactivation of the endpoint of the Consumer Actor
-    val deactivationFuture = camel.activationFutureFor(actorRef, 10 seconds)
-    // or, block wait on the deactivation
-    camel.awaitDeactivation(actorRef, 10 seconds)
+    val deactivationFuture = camel.deactivationFutureFor(actorRef)(timeout = 10 seconds)
     //#CamelDeactivation
   }
 

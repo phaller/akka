@@ -7,7 +7,7 @@ import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import akka.util.duration._
+import scala.concurrent.util.duration._
 import akka.actor.Address
 
 object ConvergenceMultiJvmSpec extends MultiNodeConfig {
@@ -106,7 +106,7 @@ abstract class ConvergenceSpec
           log.debug("assertNotMovedUp#" + n)
           assertNotMovedUp
           // wait and then check again
-          1.second.dilated.sleep
+          Thread.sleep(1.second.dilated.toMillis)
         }
       }
 

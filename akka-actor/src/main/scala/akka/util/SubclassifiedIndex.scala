@@ -30,7 +30,7 @@ object SubclassifiedIndex {
       val kids = subkeys flatMap (_ addValue value)
       if (!(values contains value)) {
         values += value
-        kids :+ (key, values)
+        kids :+ ((key, values))
       } else kids
     }
 
@@ -43,7 +43,7 @@ object SubclassifiedIndex {
       val kids = subkeys flatMap (_ removeValue value)
       if (values contains value) {
         values -= value
-        kids :+ (key, values)
+        kids :+ ((key, values))
       } else kids
     }
 
@@ -79,14 +79,14 @@ class SubclassifiedIndex[K, V] private (private var values: Set[V])(implicit sc:
    * Add key to this index which inherits its value set from the most specific
    * super-class which is known.
    */
-  def addKey(key: K): Changes = {
-    for (n ← subkeys) {
-      if (sc.isEqual(n.key, key)) return Nil
-      else if (sc.isSubclass(key, n.key)) return n.addKey(key)
+  def addKey(key: K): Changes =
+    subkeys collectFirst {
+      case n if sc.isEqual(n.key, key)    ⇒ Nil
+      case n if sc.isSubclass(key, n.key) ⇒ n.addKey(key)
+    } getOrElse {
+      integrate(new Nonroot(key, values))
+      List((key, values))
     }
-    integrate(new Nonroot(key, values))
-    (key, values) :: Nil
-  }
 
   /**
    * Add value to all keys which are subclasses of the given key. If the key
@@ -104,7 +104,7 @@ class SubclassifiedIndex[K, V] private (private var values: Set[V])(implicit sc:
       val v = values + value
       val n = new Nonroot(key, v)
       integrate(n)
-      n.addValue(key, value) :+ (key, v)
+      n.addValue(key, value) :+ ((key, v))
     } else ch
   }
 

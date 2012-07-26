@@ -8,7 +8,7 @@ import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import akka.util.duration._
+import scala.concurrent.util.duration._
 import scala.collection.immutable.SortedSet
 import java.util.concurrent.atomic.AtomicReference
 
@@ -54,7 +54,7 @@ abstract class NodeUpSpec
 
       // let it run for a while to make sure that nothing bad happens
       for (n ← 1 to 20) {
-        100.millis.dilated.sleep()
+        Thread.sleep(100.millis.dilated.toMillis)
         unexpected.get must be(SortedSet.empty)
         cluster.latestGossip.members.forall(_.status == MemberStatus.Up) must be(true)
       }

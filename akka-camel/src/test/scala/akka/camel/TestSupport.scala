@@ -4,18 +4,24 @@
 
 package akka.camel
 
-import akka.actor.{ Props, ActorSystem, Actor }
-import akka.util.duration._
+import language.postfixOps
+import language.implicitConversions
+
+import scala.concurrent.util.duration._
 import java.util.concurrent.{ TimeoutException, ExecutionException, TimeUnit }
 import org.scalatest.{ BeforeAndAfterEach, BeforeAndAfterAll, Suite }
 import org.scalatest.matchers.{ BePropertyMatcher, BePropertyMatchResult }
-import akka.util.{ FiniteDuration, Duration }
+import scala.concurrent.util.{ FiniteDuration, Duration }
+import scala.reflect.ClassTag
+import akka.actor.{ ActorRef, Props, ActorSystem, Actor }
+import concurrent.Await
+import akka.util.Timeout
 
 private[camel] object TestSupport {
 
-  def start(actor: ⇒ Actor)(implicit system: ActorSystem) = {
+  def start(actor: ⇒ Actor)(implicit system: ActorSystem): ActorRef = {
     val actorRef = system.actorOf(Props(actor))
-    CamelExtension(system).awaitActivation(actorRef, 1 second)
+    Await.result(CamelExtension(system).activationFutureFor(actorRef)(10 seconds), 10 seconds)
     actorRef
   }
 
@@ -32,17 +38,12 @@ private[camel] object TestSupport {
         camel.template.asyncRequestBody(to, msg).get(timeout.toNanos, TimeUnit.NANOSECONDS)
       } catch {
         case e: ExecutionException ⇒ throw e.getCause
-        case e: TimeoutException   ⇒ throw new AssertionError("Failed to get response to message [%s], send to endpoint [%s], within [%s]" format (msg, to, timeout), e)
+        case e: TimeoutException   ⇒ throw new AssertionError("Failed to get response to message [%s], send to endpoint [%s], within [%s]".format(msg, to, timeout))
       }
     }
 
     def routeCount = camel.context.getRoutes().size()
-  }
-
-  @deprecated
-  trait MessageSugar {
-    def Message(body: Any) = akka.camel.CamelMessage(body, Map.empty)
-    def Message(body: Any, headers: Map[String, Any]) = akka.camel.CamelMessage(body, headers)
+    def routes = camel.context.getRoutes
   }
 
   trait SharedCamelSystem extends BeforeAndAfterAll { this: Suite ⇒
@@ -78,8 +79,8 @@ private[camel] object TestSupport {
     duration millis
   }
 
-  def anInstanceOf[T](implicit manifest: Manifest[T]) = {
-    val clazz = manifest.erasure.asInstanceOf[Class[T]]
+  def anInstanceOf[T](implicit tag: ClassTag[T]) = {
+    val clazz = tag.runtimeClass.asInstanceOf[Class[T]]
     new BePropertyMatcher[AnyRef] {
       def apply(left: AnyRef) = BePropertyMatchResult(
         clazz.isAssignableFrom(left.getClass),

@@ -8,7 +8,7 @@ import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import akka.util.duration._
+import scala.concurrent.util.duration._
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.immutable.SortedSet
 
@@ -68,7 +68,7 @@ abstract class SunnyWeatherSpec
         awaitUpConvergence(roles.size)
         assertLeaderIn(roles)
         if (n % 5 == 0) log.info("Passed period [{}]", n)
-        1.seconds.sleep
+        Thread.sleep(1000)
       }
 
       enterBarrier("after")

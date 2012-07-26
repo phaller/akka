@@ -3,28 +3,26 @@
  */
 package akka.remote.testconductor
 
+import language.postfixOps
 import akka.actor.{ Actor, ActorRef, ActorSystem, LoggingFSM, Props }
 import RemoteConnection.getAddrString
 import TestConductorProtocol._
 import org.jboss.netty.channel.{ Channel, SimpleChannelUpstreamHandler, ChannelHandlerContext, ChannelStateEvent, MessageEvent }
 import com.typesafe.config.ConfigFactory
-import akka.util.duration._
+import scala.concurrent.util.duration._
 import akka.pattern.ask
-import java.util.concurrent.TimeUnit.MILLISECONDS
-import akka.dispatch.Await
-import akka.event.LoggingAdapter
-import akka.actor.PoisonPill
-import akka.event.Logging
+import scala.concurrent.Await
+import akka.event.{ LoggingAdapter, Logging }
 import scala.util.control.NoStackTrace
 import akka.event.LoggingReceive
-import akka.actor.Address
 import java.net.InetSocketAddress
-import akka.dispatch.Future
-import akka.actor.OneForOneStrategy
-import akka.actor.SupervisorStrategy
+import scala.concurrent.Future
+import akka.actor.{ OneForOneStrategy, SupervisorStrategy, Status, Address, PoisonPill }
 import java.util.concurrent.ConcurrentHashMap
-import akka.actor.Status
-import akka.util.{ Deadline, Timeout, Duration }
+import java.util.concurrent.TimeUnit.MILLISECONDS
+import akka.util.{ Timeout }
+import scala.concurrent.util.{ Deadline, Duration }
+import scala.reflect.classTag
 
 sealed trait Direction {
   def includes(other: Direction): Boolean
@@ -88,6 +86,7 @@ trait Conductor { this: TestConductorExt ⇒
     if (_controller ne null) throw new RuntimeException("TestConductorServer was already started")
     _controller = system.actorOf(Props(new Controller(participants, controllerPort)), "controller")
     import Settings.BarrierTimeout
+    import system.dispatcher
     controller ? GetSockAddr flatMap { case sockAddr: InetSocketAddress ⇒ startClient(name, sockAddr) map (_ ⇒ sockAddr) }
   }
 
@@ -98,7 +97,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def sockAddr: Future[InetSocketAddress] = {
     import Settings.QueryTimeout
-    controller ? GetSockAddr mapTo
+    controller ? GetSockAddr mapTo classTag[InetSocketAddress]
   }
 
   /**
@@ -121,7 +120,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def throttle(node: RoleName, target: RoleName, direction: Direction, rateMBit: Double): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Throttle(node, target, direction, rateMBit.toFloat) mapTo
+    controller ? Throttle(node, target, direction, rateMBit.toFloat) mapTo classTag[Done]
   }
 
   /**
@@ -136,7 +135,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def blackhole(node: RoleName, target: RoleName, direction: Direction): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Throttle(node, target, direction, 0f) mapTo
+    controller ? Throttle(node, target, direction, 0f) mapTo classTag[Done]
   }
 
   /**
@@ -149,7 +148,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def passThrough(node: RoleName, target: RoleName, direction: Direction): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Throttle(node, target, direction, -1f) mapTo
+    controller ? Throttle(node, target, direction, -1f) mapTo classTag[Done]
   }
 
   /**
@@ -162,7 +161,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def disconnect(node: RoleName, target: RoleName): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Disconnect(node, target, false) mapTo
+    controller ? Disconnect(node, target, false) mapTo classTag[Done]
   }
 
   /**
@@ -175,7 +174,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def abort(node: RoleName, target: RoleName): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Disconnect(node, target, true) mapTo
+    controller ? Disconnect(node, target, true) mapTo classTag[Done]
   }
 
   /**
@@ -188,7 +187,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def shutdown(node: RoleName, exitValue: Int): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Terminate(node, exitValue) mapTo
+    controller ? Terminate(node, exitValue) mapTo classTag[Done]
   }
 
   /**
@@ -199,7 +198,7 @@ trait Conductor { this: TestConductorExt ⇒
   // TODO: uncomment (and implement in Controller) if really needed
   //  def kill(node: RoleName): Future[Done] = {
   //    import Settings.QueryTimeout
-  //    controller ? Terminate(node, -1) mapTo
+  //    controller ? Terminate(node, -1) mapTo classTag[Done]
   //  }
 
   /**
@@ -207,7 +206,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def getNodes: Future[Iterable[RoleName]] = {
     import Settings.QueryTimeout
-    controller ? GetNodes mapTo
+    controller ? GetNodes mapTo classTag[Iterable[RoleName]]
   }
 
   /**
@@ -220,7 +219,7 @@ trait Conductor { this: TestConductorExt ⇒
    */
   def removeNode(node: RoleName): Future[Done] = {
     import Settings.QueryTimeout
-    controller ? Remove(node) mapTo
+    controller ? Remove(node) mapTo classTag[Done]
   }
 
 }
@@ -240,7 +239,7 @@ private[akka] class ConductorHandler(_createTimeout: Timeout, controller: ActorR
   override def channelConnected(ctx: ChannelHandlerContext, event: ChannelStateEvent) = {
     val channel = event.getChannel
     log.debug("connection from {}", getAddrString(channel))
-    val fsm: ActorRef = Await.result(controller ? Controller.CreateServerFSM(channel) mapTo, Duration.Inf)
+    val fsm: ActorRef = Await.result(controller ? Controller.CreateServerFSM(channel) mapTo classTag[ActorRef], Duration.Inf)
     clients.put(channel, fsm)
   }
 
@@ -444,6 +443,7 @@ private[akka] class Controller(private var initialParticipants: Int, controllerP
         case GetAddress(node) ⇒
           if (nodes contains node) sender ! ToClient(AddressReply(node, nodes(node).addr))
           else addrInterest += node -> ((addrInterest get node getOrElse Set()) + sender)
+        case _: Done ⇒ //FIXME what should happen?
       }
     case op: CommandOp ⇒
       op match {
@@ -569,7 +569,7 @@ private[akka] class BarrierCoordinator extends Actor with LoggingFSM[BarrierCoor
       val together = if (clients.exists(_.fsm == sender)) sender :: arrived else arrived
       val enterDeadline = getDeadline(timeout)
       // we only allow the deadlines to get shorter
-      if (enterDeadline < deadline) {
+      if (enterDeadline.timeLeft < deadline.timeLeft) {
         setTimer("Timeout", StateTimeout, enterDeadline.timeLeft, false)
         handleBarrier(d.copy(arrived = together, deadline = enterDeadline))
       } else

@@ -219,7 +219,7 @@ assertions concerning received messages. Here is the full list:
     An object which is an instance of the given type (after erasure) must be
     received within the allotted time frame; the object will be returned. This
     method is approximately equivalent to
-    ``expectMsgClass(manifest[T].erasure)``.
+    ``expectMsgClass(implicitly[ClassTag[T]].runtimeClass)``.
 
   * :meth:`expectMsgAnyOf[T](d: Duration, obj: T*): T`
 
@@ -695,7 +695,7 @@ Some `Specs2 <http://specs2.org>`_ users have contributed examples of how to wor
   actually beneficial also for the third point—is to apply the TestKit together
   with :class:`org.specs2.specification.Scope`.
 * The Specification traits provide a :class:`Duration` DSL which uses partly
-  the same method names as :class:`akka.util.Duration`, resulting in ambiguous
+  the same method names as :class:`scala.concurrent.util.Duration`, resulting in ambiguous
   implicits if ``akka.util.duration._`` is imported. There are two work-arounds:
 
   * either use the Specification variant of Duration and supply an implicit
@@ -708,9 +708,16 @@ Some `Specs2 <http://specs2.org>`_ users have contributed examples of how to wor
 * Specifications are by default executed concurrently, which requires some care
   when writing the tests or alternatively the ``sequential`` keyword.
 
-You can use the following two examples as guidelines:
+Testing Custom Router Logic
+===========================
 
-.. includecode:: code/docs/testkit/Specs2DemoSpec.scala
+Given the following custom (dummy) router:
 
-.. includecode:: code/docs/testkit/Specs2DemoAcceptance.scala
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/CustomRouteSpec.scala#custom-router
+
+This might be tested by dispatching messages and asserting their reception at
+the right destinations, but that can be inconvenient. Therefore exists the
+:obj:`ExtractRoute` extractor, which can be used like so:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/CustomRouteSpec.scala#test-route
 
